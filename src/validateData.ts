@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Candle } from "./types.js";
+import { FIVE_MIN_MS, ONE_MIN_MS, type Candle } from "./types.js";
 import { validateCandles, type ValidationReport } from "./dataIntegrity.js";
 
 const INST_ID = "DOT-USDT-SWAP";
@@ -12,9 +12,9 @@ const MAX_LISTED = 50;
 function intervalMsFor(bar: "5m" | "1m"): number {
   switch (bar) {
     case "5m":
-      return 5 * 60_000;
+      return FIVE_MIN_MS;
     case "1m":
-      return 60_000;
+      return ONE_MIN_MS;
   }
 }
 

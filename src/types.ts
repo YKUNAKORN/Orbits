@@ -1,3 +1,6 @@
+export const ONE_MIN_MS = 60_000;
+export const FIVE_MIN_MS = 5 * ONE_MIN_MS;
+
 export interface Candle {
   ts: number;
   open: number;

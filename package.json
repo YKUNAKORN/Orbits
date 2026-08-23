@@ -5,10 +5,13 @@
   "version": "0.1.0",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/signal.test.ts",
+    "test": "tsx --test src/*.test.ts",
     "fetch-data": "tsx src/fetchData.ts",
+    "fetch-instrument": "tsx src/fetchInstrument.ts",
+    "fetch-funding-history": "tsx src/fetchFundingHistory.ts",
     "validate": "tsx src/validateData.ts",
-    "analyze": "tsx src/analyze.ts"
+    "analyze": "tsx src/analyze.ts",
+    "backtest": "tsx src/backtest.ts"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
