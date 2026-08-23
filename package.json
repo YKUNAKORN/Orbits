@@ -7,6 +7,7 @@
     "typecheck": "tsc --noEmit",
     "test": "tsx --test src/signal.test.ts",
     "fetch-data": "tsx src/fetchData.ts",
+    "validate": "tsx src/validateData.ts",
     "analyze": "tsx src/analyze.ts"
   },
   "devDependencies": {

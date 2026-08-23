@@ -2,10 +2,11 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { at, type Candle, type Signal } from "./types.js";
-import { computeSignal } from "./signal.js";
+import { computeSignal, SIGNAL_MIN_WARMUP_BARS } from "./signal.js";
+import { splitIntoContiguousSegments } from "./dataIntegrity.js";
 
 const INST_ID = "DOT-USDT-SWAP";
-const WINDOW = 500; // must match the warmup window signal.ts requires
+const FIVE_MIN_MS = 5 * 60_000;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, "..", "data");
 
@@ -30,6 +31,17 @@ function monthKey(ts: number): string {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
+function generateSignals(segment: readonly Candle[]): Signal[] {
+  const signals: Signal[] = [];
+  for (let i = 0; i < segment.length; i++) {
+    const start = Math.max(0, i - SIGNAL_MIN_WARMUP_BARS + 1);
+    const window = segment.slice(start, i + 1);
+    const signal = computeSignal(window);
+    if (signal) signals.push(signal);
+  }
+  return signals;
+}
+
 interface ResolvedTrade {
   signal: Signal;
   exit: "tp" | "sl";
@@ -43,13 +55,15 @@ interface SimulationResult {
 
 // Entry fills at bar0's close, so the exit scan starts at bar0+1 - using
 // bar0's own high/low would score an exit against price action that
-// happened before the fill.
+// happened before the fill. Runs within a single contiguous segment only:
+// a position still open when the segment ends (a gap follows) is unresolved,
+// not carried across data we don't have.
 function simulateOnePositionAtATime(
-  candles: readonly Candle[],
+  segment: readonly Candle[],
   signals: readonly Signal[],
 ): SimulationResult {
   const tsToIndex = new Map<number, number>();
-  candles.forEach((c, i) => tsToIndex.set(c.ts, i));
+  segment.forEach((c, i) => tsToIndex.set(c.ts, i));
 
   const resolved: ResolvedTrade[] = [];
   let stillOpen: Signal | null = null;
@@ -66,8 +80,8 @@ function simulateOnePositionAtATime(
 
     let exit: "tp" | "sl" | null = null;
     let exitIndex = -1;
-    for (let i = signalIndex + 1; i < candles.length; i++) {
-      const bar = at(candles, i);
+    for (let i = signalIndex + 1; i < segment.length; i++) {
+      const bar = at(segment, i);
       const hitSl = signal.side === "long" ? bar.low <= signal.sl : bar.high >= signal.sl;
       const hitTp = signal.side === "long" ? bar.high >= signal.tp : bar.low <= signal.tp;
       if (hitSl) {
@@ -87,7 +101,7 @@ function simulateOnePositionAtATime(
       nextAvailableIndex = exitIndex; // closed out on this bar; its own close can open the next signal
     } else {
       stillOpen = signal;
-      break; // ran out of data before this position resolved
+      break; // ran out of segment before this position resolved
     }
   }
 
@@ -106,12 +120,23 @@ function main(): void {
     `Loaded ${candles.length} 5m candles: ${new Date(first.ts).toISOString()} -> ${new Date(last.ts).toISOString()}`,
   );
 
+  const segments = splitIntoContiguousSegments(candles, FIVE_MIN_MS);
+  const gapCount = segments.length - 1;
+  console.log(`${segments.length} contiguous segment(s) (${gapCount} gap(s) split the data)`);
+
   const signals: Signal[] = [];
-  for (let i = 0; i < candles.length; i++) {
-    const start = Math.max(0, i - WINDOW + 1);
-    const window = candles.slice(start, i + 1);
-    const signal = computeSignal(window);
-    if (signal) signals.push(signal);
+  const resolved: ResolvedTrade[] = [];
+  let stillOpenCount = 0;
+  let ignoredCount = 0;
+
+  for (const segment of segments) {
+    const segmentSignals = generateSignals(segment);
+    signals.push(...segmentSignals);
+    if (segmentSignals.length === 0) continue;
+    const sim = simulateOnePositionAtATime(segment, segmentSignals);
+    resolved.push(...sim.resolved);
+    if (sim.stillOpen) stillOpenCount += 1;
+    ignoredCount += sim.ignoredCount;
   }
 
   console.log("\n=== 1. Signal counts ===");
@@ -153,17 +178,14 @@ function main(): void {
   if (signals.length === 0) {
     console.log("N/A - no signals.");
   } else {
-    const sim = simulateOnePositionAtATime(candles, signals);
-    const survivedCount = sim.resolved.length + (sim.stillOpen ? 1 : 0);
+    const survivedCount = resolved.length + stillOpenCount;
     console.log(
-      `${survivedCount} survive out of ${signals.length} raw signals (${sim.ignoredCount} ignored while a position was open)`,
+      `${survivedCount} survive out of ${signals.length} raw signals (${ignoredCount} ignored while a position was open)`,
     );
-    console.log(`  resolved by TP: ${sim.resolved.filter((r) => r.exit === "tp").length}`);
-    console.log(`  resolved by SL: ${sim.resolved.filter((r) => r.exit === "sl").length}`);
-    if (sim.stillOpen) {
-      console.log(
-        `  1 position still open at end of data (opened ${new Date(sim.stillOpen.time).toISOString()}), not counted as TP or SL`,
-      );
+    console.log(`  resolved by TP: ${resolved.filter((r) => r.exit === "tp").length}`);
+    console.log(`  resolved by SL: ${resolved.filter((r) => r.exit === "sl").length}`);
+    if (stillOpenCount > 0) {
+      console.log(`  still open at end of a segment (unresolved): ${stillOpenCount}`);
     }
     console.log(
       "  Note: touch-based check on 5m highs/lows only - no fees, no slippage, no 1m refinement. Phase 2 scope, not final P&L.",

@@ -93,3 +93,40 @@ test("only 2 of 3 strong bars produces no signal", () => {
 
   assert.equal(computeSignal(candles), null);
 });
+
+test("a candle with high equal to low is never strong", () => {
+  const base = rampWarmup(500, 5, 10);
+  const lastTs = at(base, base.length - 1).ts;
+  const bar2 = makeCandle(lastTs + 300_000, 10, 10.5, 9.8, 10.4); // strong up
+  const bar1 = makeCandle(lastTs + 600_000, 10.4, 10.4, 10.4, 10.4); // flat: high === low, range 0
+  const bar0 = makeCandle(lastTs + 900_000, 10.4, 11.0, 10.35, 10.95); // strong up
+  const candles = [...base, bar2, bar1, bar0];
+
+  assert.equal(computeSignal(candles), null);
+});
+
+test("guard rejects a signal where SL lands on the wrong side of entry", () => {
+  // Large, long-established ramp so EMA12>26>100 has wide margin and small
+  // pattern-bar wiggles near the end can't flip the trend ordering.
+  const base = rampWarmup(500, 1, 1000);
+  const lastTs = at(base, base.length - 1).ts;
+  const bar2 = makeCandle(lastTs + 300_000, 999, 1001.2, 998.7, 1001); // strong up, low 998.7
+  const bar1 = makeCandle(lastTs + 600_000, 996, 997.6, 995.7, 997.5); // strong up, small gap down
+  const bar0 = makeCandle(lastTs + 900_000, 997.5, 998.6, 997.2, 998.5); // strong up, close 998.5 (entry)
+  const candles = [...base, bar2, bar1, bar0];
+
+  // sanity: this really is the degenerate case under test (sl >= entry)
+  assert.ok(bar2.low >= bar0.close, "test setup: expected bar2.low >= bar0.close");
+  assert.equal(computeSignal(candles), null);
+});
+
+test("a gap between pattern bars produces no signal even though the OHLC would otherwise qualify", () => {
+  const base = rampWarmup(500, 5, 10);
+  const lastTs = at(base, base.length - 1).ts;
+  const bar2 = makeCandle(lastTs + 300_000, 10, 10.5, 9.8, 10.4); // strong up
+  const bar1 = makeCandle(lastTs + 900_000, 10.4, 11.0, 10.3, 10.9); // strong up, but one interval missing before it
+  const bar0 = makeCandle(lastTs + 1_200_000, 10.9, 11.6, 10.85, 11.5); // strong up, normal spacing from bar1
+  const candles = [...base, bar2, bar1, bar0];
+
+  assert.equal(computeSignal(candles), null);
+});

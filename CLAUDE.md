@@ -135,8 +135,8 @@ Do not build ahead of the current phase. Ask before starting the next one.
 
 1. **Measure** — fetch OKX history, count signals, measure the SL distance
    distribution, count how many signals survive the one-position rule.
-2. **Backtest** — full P&L with fees, slippage, and funding. 1m data used to resolve
-   intrabar TP/SL ordering. In-sample and out-of-sample split.
+2. **Backtest** — full P&L with fees, slippage, and funding. In-sample and
+   out-of-sample split.
 
    Fill model, matching the execution policy above:
    - Entry fills at the signal bar's close, plus slippage against the trade, taker fee.
@@ -145,11 +145,22 @@ Do not build ahead of the current phase. Ask before starting the next one.
      Fills at the TP price exactly, maker fee, no slippage.
    - SL triggers on touch, fills at the SL price minus slippage against the trade,
      taker fee.
-   - If a single 5m bar reaches both levels, resolve the order with 1m data. If the 1m
-     data is also ambiguous, assume SL first.
    - Report results twice: once with this model, and once assuming every exit is a
      taker fill. The gap between the two is the value of the limit TP, and it is only
      real if the demo phase confirms a comparable maker fill rate.
+
+   **Intrabar ambiguity.** When a single 5m bar reaches both TP and SL, its OHLC cannot
+   say which came first, and the difference is 3R on that trade. Do not fetch 1m data to
+   settle this up front. Instead, run the backtest twice on 5m data alone:
+
+   - Lower bound: every ambiguous bar resolves as SL.
+   - Upper bound: every ambiguous bar resolves as TP.
+
+   Always report the percentage of trades that were ambiguous alongside both bounds.
+   If both bounds are profitable, the system passes and 1m data is never needed. If both
+   are unprofitable, it fails and 1m data is never needed. Only when the bounds straddle
+   zero is 1m data worth fetching, and then only for the periods containing ambiguous
+   trades, not the whole history.
 3. **Paper trade** — OKX demo. Verify live signals match backtest signals exactly.
 4. **Live** — smallest size that clears `minSz`, plus a kill switch.
 5. **Dashboard** — read-only status plus kill switch. Mobile-responsive. Single user,

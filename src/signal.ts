@@ -29,19 +29,36 @@ function isStrongDown(bar: Candle): boolean {
   return isStrong(bar) && bar.close < bar.open;
 }
 
+// True only if every consecutive pair in the window is spaced exactly like
+// bar0-bar1. A missing candle anywhere (warmup or pattern bars) breaks this,
+// which is exactly what should invalidate the window: EMAs assume evenly
+// spaced closes, and the 3-bar pattern assumes bar[0..2] are truly consecutive.
+function hasConsistentSpacing(window: readonly Candle[]): boolean {
+  const step = at(window, window.length - 1).ts - at(window, window.length - 2).ts;
+  if (step <= 0) return false;
+  for (let i = 1; i < window.length; i++) {
+    if (at(window, i).ts - at(window, i - 1).ts !== step) return false;
+  }
+  return true;
+}
+
 // candles must be oldest-to-newest; the last element is bar[0], the signal bar.
+// Only the trailing MIN_WARMUP_BARS are used, so the result is the same
+// regardless of how much extra history the caller happens to pass in.
 export function computeSignal(candles: readonly Candle[]): Signal | null {
   if (candles.length < MIN_WARMUP_BARS) return null;
+  const window = candles.length > MIN_WARMUP_BARS ? candles.slice(candles.length - MIN_WARMUP_BARS) : candles;
+  if (!hasConsistentSpacing(window)) return null;
 
-  const closes = candles.map((c) => c.close);
+  const closes = window.map((c) => c.close);
   const emaFast = ema(closes, EMA_FAST);
   const emaMid = ema(closes, EMA_MID);
   const emaSlow = ema(closes, EMA_SLOW);
 
-  const last = candles.length - 1;
-  const bar0 = at(candles, last);
-  const bar1 = at(candles, last - 1);
-  const bar2 = at(candles, last - 2); // first candle of the three (oldest)
+  const last = window.length - 1;
+  const bar0 = at(window, last);
+  const bar1 = at(window, last - 1);
+  const bar2 = at(window, last - 2); // first candle of the three (oldest)
 
   const eFast = at(emaFast, last);
   const eMid = at(emaMid, last);
