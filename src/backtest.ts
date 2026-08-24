@@ -6,6 +6,7 @@ import { loadInstrumentSpec, type InstrumentSpec } from "./instrumentSpec.js";
 import { countFundingCrossings } from "./funding.js";
 import { fundingHistoryCachePath, type FundingRateRecord } from "./fetchFundingHistory.js";
 import { mean } from "./stats.js";
+import { num, pct, usd } from "./format.js";
 import {
   DEFAULT_MAKER_FEE_RATE,
   DEFAULT_TAKER_FEE_RATE,
@@ -23,7 +24,11 @@ import {
 
 const INST_ID = "DOT-USDT-SWAP";
 const STARTING_EQUITY_USDT = 100;
-const FUNDING_MATERIALITY_THRESHOLD = 0.05; // 5%, per CLAUDE.md section 4
+// 5% materiality bar for bothering to model funding cost at all. This is
+// NOT in CLAUDE.md - CLAUDE.md section 4 says only "full P&L with fees,
+// slippage, and funding" unconditionally. The 5% figure was set by the
+// user's chat instructions for the Phase 2 task, not the frozen spec file.
+const FUNDING_MATERIALITY_THRESHOLD = 0.05;
 const SLIPPAGE_TICKS_SCENARIOS = [0, 1, 2] as const;
 const AMBIGUOUS_BOUNDS: readonly AmbiguousBound[] = ["lower", "upper"];
 const FEE_MODELS: readonly FeeModel[] = ["limit-tp", "all-taker"];
@@ -39,18 +44,6 @@ const DATA_DIR = path.join(__dirname, "..", "data");
 function loadCandles(bar: string): Candle[] {
   const raw = readFileSync(path.join(DATA_DIR, `${INST_ID}-${bar}.json`), "utf8");
   return JSON.parse(raw) as Candle[];
-}
-
-function pct(x: number, digits = 2): string {
-  return Number.isFinite(x) ? `${x.toFixed(digits)}%` : "N/A";
-}
-
-function usd(x: number, digits = 4): string {
-  return Number.isFinite(x) ? x.toFixed(digits) : "N/A";
-}
-
-function num(x: number, digits = 3): string {
-  return Number.isFinite(x) ? x.toFixed(digits) : "N/A";
 }
 
 interface ScenarioLabel {
@@ -212,7 +205,7 @@ function main(): void {
   let fundingSummary: FundingRateSummary | null = null;
   if (!fundingCostEnabled) {
     log(
-      `Below the ${FUNDING_MATERIALITY_THRESHOLD * 100}% materiality bar - funding cost is NOT modelled (kept at 0 in every scenario below), per CLAUDE.md section 4.`,
+      `Below the ${FUNDING_MATERIALITY_THRESHOLD * 100}% materiality bar - funding cost is NOT modelled (kept at 0 in every scenario below).`,
     );
   } else {
     log(`At or above the ${FUNDING_MATERIALITY_THRESHOLD * 100}% materiality bar - fetching real funding rate history.`);

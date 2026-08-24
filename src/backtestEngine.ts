@@ -25,7 +25,7 @@ export interface BacktestConfig {
   // When set, a constant funding rate applied on every crossed 8h boundary.
   // null means funding cost is not modelled (see funding measurement in
   // backtest.ts - this is only populated if that measurement crosses the
-  // 5% materiality bar the spec sets for bothering to model it at all).
+  // 5% materiality bar backtest.ts applies before bothering to model it).
   fundingRateForCost: number | null;
 }
 
@@ -35,6 +35,7 @@ export interface ClosedTrade {
   exitTs: number;
   rawOutcome: NaturalOutcome; // "open" never appears here - unresolved trades aren't closed trades
   resolvedAs: ResolvedOutcome;
+  slPct: number; // |signal.entry - signal.sl| / signal.entry, the theoretical (pre-fill) SL distance
   contracts: number;
   entryFillPrice: number;
   exitFillPrice: number;
@@ -61,7 +62,7 @@ export interface RunResult {
   finalEquityUsdt: number;
 }
 
-interface NaturalResolution {
+export interface NaturalResolution {
   entryIndex: number;
   exitIndex: number | null;
   outcome: NaturalOutcome;
@@ -230,6 +231,7 @@ export function runScenario(prepared: PreparedData, spec: InstrumentSpec, config
         exitTs,
         rawOutcome: natural.outcome,
         resolvedAs,
+        slPct: Math.abs(signal.entry - signal.sl) / signal.entry,
         contracts,
         entryFillPrice,
         exitFillPrice,

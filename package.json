@@ -11,7 +11,9 @@
     "fetch-funding-history": "tsx src/fetchFundingHistory.ts",
     "validate": "tsx src/validateData.ts",
     "analyze": "tsx src/analyze.ts",
-    "backtest": "tsx src/backtest.ts"
+    "backtest": "tsx src/backtest.ts",
+    "diagnose": "tsx src/diagnose.ts",
+    "charts": "tsx src/charts.ts"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",

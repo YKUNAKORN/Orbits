@@ -75,6 +75,7 @@ test("long TP trade: maker fee, no exit slippage, fees included in net P&L", () 
   assert.equal(run.trades.length, 1);
   const t = run.trades[0] as ClosedTrade;
   assert.equal(t.contracts, 4); // riskUsdt=2, slPct=0.05 -> targetNotional=40, /entry(10) -> 4 contracts
+  assertClose(t.slPct, 0.05);
   assert.equal(t.resolvedAs, "tp");
   assertClose(t.entryFillPrice, 10); // 0 slippage
   assertClose(t.exitFillPrice, 11); // maker: fills exactly at TP
@@ -205,6 +206,7 @@ function fixtureTrade(overrides: Partial<ClosedTrade>): ClosedTrade {
     exitTs: STEP,
     rawOutcome: "tp",
     resolvedAs: "tp",
+    slPct: 0.05,
     contracts: 1,
     entryFillPrice: 10,
     exitFillPrice: 11,
