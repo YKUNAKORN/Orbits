@@ -2,7 +2,7 @@ import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
-import { at, type Candle } from "./types.js";
+import { at, FIVE_MIN_MS, type Candle } from "./types.js";
 import { loadInstrumentSpec } from "./instrumentSpec.js";
 import { computeMetrics, computeSplitTs, prepareData, runScenario, type BacktestConfig, type ClosedTrade } from "./backtestEngine.js";
 import { addLine, addPolyline, addRect, addText, createCanvas, linearScale, plotArea, render } from "./svg.js";
@@ -247,7 +247,7 @@ function main(): void {
     console.log("No 5m candles found in data/. Run fetch-data first.");
     return;
   }
-  const prepared = prepareData(candles, spec);
+  const prepared = prepareData(candles, spec, FIVE_MIN_MS);
   const splitTsValue = computeSplitTs(prepared.firstTs, prepared.lastTs);
   const run = runScenario(prepared, spec, CANONICAL_CONFIG);
   const metrics = computeMetrics(run.trades, STARTING_EQUITY_USDT, {

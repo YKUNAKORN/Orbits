@@ -15,11 +15,13 @@ import {
   type ClosedTrade,
 } from "./backtestEngine.js";
 import { buildDirectionalVariants, mulberry32, percentileRankOf, runPermutationTrials } from "./randomBaseline.js";
+import { barIntervalMs, isBar, SUPPORTED_BARS, type Bar } from "./barInterval.js";
 
 const INST_ID = "DOT-USDT-SWAP";
+const DEFAULT_BAR: Bar = "5m";
 const STARTING_EQUITY_USDT = 100;
-const PERMUTATION_TRIALS = 100;
-const PERMUTATION_SEED = 20260824; // fixed: reruns reproduce the same 100 trials
+const DEFAULT_PERMUTATION_TRIALS = 100;
+const PERMUTATION_SEED = 20260824; // fixed: reruns reproduce the same trials regardless of trial count or timeframe
 const SAMPLE_DAY_COUNT = 3;
 const SAMPLE_DAY_SEED = 20260824;
 // Real execution costs, same as the canonical scenario in backtest.ts, used
@@ -54,13 +56,50 @@ function loadCandles(bar: string): Candle[] {
   return JSON.parse(raw) as Candle[];
 }
 
+interface Cli {
+  bar: Bar;
+  trials: number;
+}
+
+function parseArgs(argv: readonly string[]): Cli {
+  let bar: Bar = DEFAULT_BAR;
+  let trials = DEFAULT_PERMUTATION_TRIALS;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--bar") {
+      const value = argv[i + 1];
+      if (value === undefined || !isBar(value)) {
+        throw new Error(`--bar must be one of: ${SUPPORTED_BARS.join(", ")} (got ${String(value)})`);
+      }
+      bar = value;
+      i += 1;
+    } else if (arg === "--trials") {
+      const value = argv[i + 1];
+      const n = value === undefined ? NaN : Number(value);
+      if (!Number.isInteger(n) || n <= 0) {
+        throw new Error(`--trials must be a positive integer (got ${String(value)})`);
+      }
+      trials = n;
+      i += 1;
+    }
+  }
+  return { bar, trials };
+}
+
+// The 5m outputs keep their original, unsuffixed filenames (Phase 2's
+// already-completed artifact) - every other timeframe gets its own
+// bar-suffixed files so a Phase 2b run never overwrites Phase 2's report.
+function outputFileName(base: string, ext: string, bar: Bar): string {
+  return bar === "5m" ? `${base}.${ext}` : `${base}-${bar}.${ext}`;
+}
+
 function utcDateKey(ts: number): string {
   return new Date(ts).toISOString().slice(0, 10); // YYYY-MM-DD
 }
 
 // --- Step 1: export a manually-checkable sample -----------------------
 
-function exportRandomDaysCsv(allSignals: readonly Signal[], log: (line?: string) => void): void {
+function exportRandomDaysCsv(allSignals: readonly Signal[], bar: Bar, log: (line?: string) => void): void {
   const byDay = new Map<string, Signal[]>();
   for (const s of allSignals) {
     const key = utcDateKey(s.time);
@@ -85,7 +124,7 @@ function exportRandomDaysCsv(allSignals: readonly Signal[], log: (line?: string)
   for (const s of rows) {
     lines.push(`${new Date(s.time).toISOString()},${s.side},${s.entry},${s.sl},${s.tp}`);
   }
-  const file = path.join(DATA_DIR, "signal-sample-3days.csv");
+  const file = path.join(DATA_DIR, outputFileName("signal-sample-3days", "csv", bar));
   writeFileSync(file, lines.join("\n") + "\n");
 
   log("=== Step 1: manual-check sample ===");
@@ -150,24 +189,25 @@ function main(): void {
     console.log(line);
   };
 
+  const { bar, trials: trialCount } = parseArgs(process.argv.slice(2));
   const spec = loadInstrumentSpec(INST_ID);
-  const candles = loadCandles("5m");
+  const candles = loadCandles(bar);
   if (candles.length === 0) {
-    console.log("No 5m candles found in data/. Run fetch-data first.");
+    console.log(`No ${bar} candles found in data/. Run fetch-data first.`);
     return;
   }
 
-  log("=== Phase 2 diagnosis: why is expectancy negative? ===");
+  log(`=== ${bar} diagnosis: gross expectancy, permutation test, breakdowns ===`);
   log("Root-cause investigation only - CLAUDE.md section 4 (bodyRatio, RR, EMA periods, strong-candle test) is untouched.");
   log("");
 
   const t0 = Date.now();
-  const prepared = prepareData(candles, spec);
+  const prepared = prepareData(candles, spec, barIntervalMs(bar));
   log(`Prepared ${prepared.totalSignalCount} raw signals over ${prepared.segments.length} segment(s) in ${Date.now() - t0}ms`);
   log("");
 
   const allRawSignals = prepared.signalsBySegment.flat();
-  exportRandomDaysCsv(allRawSignals, log);
+  exportRandomDaysCsv(allRawSignals, bar, log);
 
   const splitTsValue = computeSplitTs(prepared.firstTs, prepared.lastTs);
 
@@ -197,7 +237,7 @@ function main(): void {
     "Same anchors (bar2/bar0), same entry/SL/TP construction formula, same one-position-at-a-time rule, same position sizing, same engine (runScenario) - the ONLY thing randomized is which direction (long/short) each anchor trades, via a fair coin. Fee=0/slippage=0/funding=0, matching step 2, so the comparison is apples to apples.",
   );
   const variants = buildDirectionalVariants(prepared, spec);
-  const trials = runPermutationTrials(prepared, variants, spec, STARTING_EQUITY_USDT, PERMUTATION_TRIALS, PERMUTATION_SEED);
+  const trials = runPermutationTrials(prepared, variants, spec, STARTING_EQUITY_USDT, trialCount, PERMUTATION_SEED);
   const trialWinRates = trials.map((t) => t.winRate).filter((v) => Number.isFinite(v));
   const trialExpectancies = trials.map((t) => t.expectancyR).filter((v) => Number.isFinite(v));
   const trialNs = trials.map((t) => t.n);
@@ -207,17 +247,34 @@ function main(): void {
   const winRatePercentile = percentileRankOf(realWinRatePct, trialWinRates.map((r) => r * 100));
   const expectancyPercentile = percentileRankOf(realExpectancyR, trialExpectancies);
 
-  log(`${PERMUTATION_TRIALS} trials, seed=${PERMUTATION_SEED}. Trial n ranges ${Math.min(...trialNs)}-${Math.max(...trialNs)} trades (real system, gross: n=${grossOverall.sampleSize}).`);
+  log(`${trialCount} trials, seed=${PERMUTATION_SEED}. Trial n ranges ${Math.min(...trialNs)}-${Math.max(...trialNs)} trades (real system, gross: n=${grossOverall.sampleSize}).`);
   log(
     `Random-baseline win rate: mean=${pct(mean(trialWinRates) * 100)} min=${pct(Math.min(...trialWinRates) * 100)} max=${pct(Math.max(...trialWinRates) * 100)}`,
   );
   log(
     `Random-baseline E[R]:     mean=${num(mean(trialExpectancies))} min=${num(Math.min(...trialExpectancies))} max=${num(Math.max(...trialExpectancies))}`,
   );
-  log(`Real system's gross win rate (${pct(realWinRatePct)}) sits at percentile ${num(winRatePercentile, 1)} of the ${PERMUTATION_TRIALS} random trials.`);
-  log(`Real system's gross E[R] (${num(realExpectancyR)}) sits at percentile ${num(expectancyPercentile, 1)} of the ${PERMUTATION_TRIALS} random trials.`);
+  log(`Real system's gross win rate (${pct(realWinRatePct)}) sits at percentile ${num(winRatePercentile, 1)} of the ${trialCount} random trials.`);
+  log(`Real system's gross E[R] (${num(realExpectancyR)}) sits at percentile ${num(expectancyPercentile, 1)} of the ${trialCount} random trials.`);
   log(
     "A percentile near 50 means the pattern's directional call is statistically indistinguishable from a coin flip at these same moments; near 0 or 100 would mean it's notably worse or better than random.",
+  );
+
+  // Phase 2b (docs/hypothesis-2b.md) criterion 3 is the raw 95th percentile
+  // of this timeframe's own null. The Bonferroni line is the required
+  // multiple-testing disclosure for testing 4 timeframes (family alpha 0.05
+  // / 4 = 0.0125 per-test, i.e. the 98.75th percentile) - reported
+  // alongside, not substituted for, the pre-registered 95th-percentile bar.
+  const BONFERRONI_TEST_COUNT = 4; // 5m + 15m + 1H + 4H, per docs/hypothesis-2b.md
+  const bonferroniPercentileBar = 100 - 5 / BONFERRONI_TEST_COUNT; // 98.75
+  const sortedWinRatesPct = [...trialWinRates].map((r) => r * 100).sort((a, b) => a - b);
+  const winRateAt95th = percentile(sortedWinRatesPct, 95);
+  const winRateAtBonferroniBar = percentile(sortedWinRatesPct, bonferroniPercentileBar);
+  log(
+    `Raw 95th-percentile bar: ${pct(winRateAt95th)}. Real gross win rate ${realWinRatePct >= winRateAt95th ? "CLEARS" : "does not clear"} it.`,
+  );
+  log(
+    `Bonferroni-adjusted bar for ${BONFERRONI_TEST_COUNT} timeframes (${num(bonferroniPercentileBar, 2)}th percentile): ${pct(winRateAtBonferroniBar)}. Real gross win rate ${realWinRatePct >= winRateAtBonferroniBar ? "still clears" : "does not clear"} it.`,
   );
   log("");
 
@@ -261,19 +318,20 @@ function main(): void {
 
   log(`Total diagnosis time: ${Date.now() - t0}ms`);
 
-  const reportPath = path.join(DATA_DIR, "diagnosis-report.txt");
+  const reportPath = path.join(DATA_DIR, outputFileName("diagnosis-report", "txt", bar));
   writeFileSync(reportPath, report.join("\n") + "\n");
   console.log(`Report written to ${reportPath}`);
 
-  const jsonPath = path.join(DATA_DIR, "diagnosis-results.json");
+  const jsonPath = path.join(DATA_DIR, outputFileName("diagnosis-results", "json", bar));
   writeFileSync(
     jsonPath,
     JSON.stringify(
       {
         generatedAt: new Date().toISOString(),
+        bar,
         gross: { overall: grossOverall, inSample: grossSplit.inSample, outOfSample: grossSplit.outOfSample },
         permutation: {
-          trials: PERMUTATION_TRIALS,
+          trials: trialCount,
           seed: PERMUTATION_SEED,
           trialWinRates,
           trialExpectancies,
@@ -281,6 +339,10 @@ function main(): void {
           realExpectancyR,
           winRatePercentile,
           expectancyPercentile,
+          bonferroniTestCount: BONFERRONI_TEST_COUNT,
+          bonferroniPercentileBar,
+          winRateAt95th,
+          winRateAtBonferroniBar,
         },
         canonical: { overall: canonicalMetrics, byYear: yearly, bySide, byQuartile, byHour, quartileBreakpoints: { q1, q2, q3 } },
       },

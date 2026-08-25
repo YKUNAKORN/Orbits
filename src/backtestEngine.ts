@@ -1,4 +1,4 @@
-import { at, FIVE_MIN_MS, type Candle, type Side, type Signal } from "./types.js";
+import { at, type Candle, type Side, type Signal } from "./types.js";
 import { splitIntoContiguousSegments } from "./dataIntegrity.js";
 import { generateSignals } from "./signalScan.js";
 import { computePositionSize, RISK_PER_TRADE } from "./positionSizing.js";
@@ -115,8 +115,12 @@ export function computeNaturalResolutions(
   });
 }
 
-export function prepareData(candles: readonly Candle[], spec: InstrumentSpec): PreparedData {
-  const segments = splitIntoContiguousSegments(candles, FIVE_MIN_MS);
+// intervalMs is the candle bar interval (e.g. FIVE_MIN_MS, or any other
+// value from barInterval.ts) - required explicitly rather than defaulted,
+// so a caller backtesting a non-5m timeframe can't silently segment on the
+// wrong interval and manufacture phantom gaps (or hide real ones).
+export function prepareData(candles: readonly Candle[], spec: InstrumentSpec, intervalMs: number): PreparedData {
+  const segments = splitIntoContiguousSegments(candles, intervalMs);
   const signalsBySegment = segments.map((segment) => generateSignals(segment));
   const naturalResolutionsBySegment = segments.map((segment, i) =>
     computeNaturalResolutions(segment, at(signalsBySegment, i), spec.tickSz),

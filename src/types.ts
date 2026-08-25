@@ -1,5 +1,8 @@
 export const ONE_MIN_MS = 60_000;
 export const FIVE_MIN_MS = 5 * ONE_MIN_MS;
+export const FIFTEEN_MIN_MS = 15 * ONE_MIN_MS;
+export const ONE_HOUR_MS = 60 * ONE_MIN_MS;
+export const FOUR_HOUR_MS = 4 * ONE_HOUR_MS;
 
 export interface Candle {
   ts: number;

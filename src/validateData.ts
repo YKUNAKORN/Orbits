@@ -1,22 +1,14 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { FIVE_MIN_MS, ONE_MIN_MS, type Candle } from "./types.js";
+import type { Candle } from "./types.js";
 import { validateCandles, type ValidationReport } from "./dataIntegrity.js";
+import { barIntervalMs, SUPPORTED_BARS } from "./barInterval.js";
 
 const INST_ID = "DOT-USDT-SWAP";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, "..", "data");
 const MAX_LISTED = 50;
-
-function intervalMsFor(bar: "5m" | "1m"): number {
-  switch (bar) {
-    case "5m":
-      return FIVE_MIN_MS;
-    case "1m":
-      return ONE_MIN_MS;
-  }
-}
 
 function loadCandles(bar: string): Candle[] {
   const raw = readFileSync(path.join(DATA_DIR, `${INST_ID}-${bar}.json`), "utf8");
@@ -56,7 +48,7 @@ function printReport(bar: string, report: ValidationReport): void {
 }
 
 function main(): void {
-  for (const bar of ["5m", "1m"] as const) {
+  for (const bar of SUPPORTED_BARS) {
     let candles: Candle[];
     try {
       candles = loadCandles(bar);
@@ -64,7 +56,7 @@ function main(): void {
       console.log(`\n=== ${bar}: no data file, skipping ===`);
       continue;
     }
-    const report = validateCandles(candles, intervalMsFor(bar));
+    const report = validateCandles(candles, barIntervalMs(bar));
     printReport(bar, report);
   }
 }

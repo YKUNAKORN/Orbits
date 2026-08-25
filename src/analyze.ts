@@ -1,12 +1,13 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { at, FIVE_MIN_MS, type Candle, type Signal } from "./types.js";
+import { at, type Candle, type Signal } from "./types.js";
 import { splitIntoContiguousSegments } from "./dataIntegrity.js";
 import { generateSignals } from "./signalScan.js";
 import { sequenceTrades } from "./tradeSequencer.js";
 import { loadInstrumentSpec } from "./instrumentSpec.js";
 import { percentile, monthKey } from "./stats.js";
+import { barIntervalMs, isBar, SUPPORTED_BARS, type Bar } from "./barInterval.js";
 
 const INST_ID = "DOT-USDT-SWAP";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -17,20 +18,31 @@ function loadCandles(bar: string): Candle[] {
   return JSON.parse(raw) as Candle[];
 }
 
+function parseBarArg(argv: readonly string[]): Bar {
+  const idx = argv.indexOf("--bar");
+  if (idx === -1) return "5m";
+  const value = argv[idx + 1];
+  if (value === undefined || !isBar(value)) {
+    throw new Error(`--bar must be one of: ${SUPPORTED_BARS.join(", ")} (got ${String(value)})`);
+  }
+  return value;
+}
+
 function main(): void {
-  const candles = loadCandles("5m");
+  const bar = parseBarArg(process.argv.slice(2));
+  const candles = loadCandles(bar);
   if (candles.length === 0) {
-    console.log("No 5m candles found in data/. Run fetch-data first.");
+    console.log(`No ${bar} candles found in data/. Run fetch-data first.`);
     return;
   }
   const first = at(candles, 0);
   const last = at(candles, candles.length - 1);
   console.log(
-    `Loaded ${candles.length} 5m candles: ${new Date(first.ts).toISOString()} -> ${new Date(last.ts).toISOString()}`,
+    `Loaded ${candles.length} ${bar} candles: ${new Date(first.ts).toISOString()} -> ${new Date(last.ts).toISOString()}`,
   );
 
   const spec = loadInstrumentSpec(INST_ID);
-  const segments = splitIntoContiguousSegments(candles, FIVE_MIN_MS);
+  const segments = splitIntoContiguousSegments(candles, barIntervalMs(bar));
   const gapCount = segments.length - 1;
   console.log(`${segments.length} contiguous segment(s) (${gapCount} gap(s) split the data)`);
 
@@ -109,7 +121,7 @@ function main(): void {
       console.log(`  still open at end of a segment (unresolved): ${stillOpenCount}`);
     }
     console.log(
-      "  Note: touch/tick check on 5m highs/lows only - no fees, no slippage, no 1m refinement. Phase 2 scope, not final P&L.",
+      `  Note: touch/tick check on ${bar} highs/lows only - no fees, no slippage, no finer-timeframe refinement. Phase 1 scope, not final P&L.`,
     );
   }
 }

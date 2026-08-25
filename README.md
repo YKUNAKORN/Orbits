@@ -33,6 +33,20 @@ this file is stale.
   is statistically indistinguishable from a coin flip, and real trading
   costs consistently exceed it. No parameter in CLAUDE.md section 4 was
   changed to reach this conclusion.
+- **Phase 2b (timeframe hypothesis): done, closed.** Tested whether a
+  slower timeframe (15m, 1H, 4H) reduces the cost problem enough to pass,
+  since wider stops mean fixed costs are a smaller fraction of R. Same
+  frozen spec, same engine, only the candle timeframe changed. Result: no
+  timeframe (5m, 15m, 1H, or 4H) clears the pre-registered pass bar - 5m/
+  15m/4H fail on negative in-sample net expectancy, 1H (the one timeframe
+  with positive net expectancy on both sides of the split) fails on
+  out-of-sample sample size (n=84 of the required 100). The `auditor`
+  subagent found the permutation test originally used to argue "no better
+  than chance" has an unreliable null (see below) - that specific reasoning
+  was withdrawn, but the pass/fail verdict does not depend on it. See
+  "Timeframe doesn't rescue it" below and
+  [`docs/phase2b-results.md`](docs/phase2b-results.md) for the full
+  per-timeframe breakdown. CLAUDE.md section 4 is unchanged by this phase.
 - **Phase 3 (Paper trade): not started.** Per CLAUDE.md's phase discipline,
   this does not start until there is a reason to believe Phase 2 would pass
   - it currently does not.
@@ -49,16 +63,27 @@ RR, the EMA periods, or the strong-candle test, found:
    reward:risk. Gross expectancy is about +0.03R to +0.05R per trade. This
    means the deficit reported in Phase 2 is a **cost problem layered on a
    near-zero signal**, not a total absence of directional information.
-2. **That thin edge is not statistically distinguishable from random.** A
-   100-trial permutation test replays the exact same entry anchors, the same
-   entry/SL/TP construction formula, the same one-position-at-a-time rule,
-   the same position sizing, and the same engine (`runScenario`, unmodified)
-   - the only thing randomized is which direction (long/short) each anchor
-   trades, via a fair coin. The real system's gross win rate lands at the
-   **75th percentile** of that random distribution (mean 34.1%, range
-   32.4%-36.0%). A real, reliable directional edge would be expected to sit
-   much closer to the 95th-99th percentile or above; 75th is consistent with
-   "this could easily be luck."
+2. **That thin edge is not statistically distinguishable from random -
+   caveat added after Phase 2b's audit, see below.** A 100-trial permutation
+   test replays the exact same entry anchors, the same entry/SL/TP
+   construction formula, the same one-position-at-a-time rule, the same
+   position sizing, and the same engine (`runScenario`, unmodified) - the
+   only thing randomized is *meant* to be which direction (long/short) each
+   anchor trades, via a fair coin. The real system's gross win rate lands at
+   the **75th percentile** of that random distribution (mean 34.1%, range
+   32.4%-36.0%). **Phase 2b's audit (see "Timeframe doesn't rescue it"
+   below) found that this permutation test's null is not actually a
+   coin-flip over direction** - `src/randomBaseline.ts` drops almost every
+   anchor where the opposite direction is geometrically valid after three
+   consecutive strong candles, so each trial ends up close to a random
+   subsample of the system's own real trades rather than a genuine random-
+   direction baseline. The 75th-percentile figure above should therefore be
+   read as "not obviously exceptional" rather than a rigorous "indistinguishable
+   from luck" - it does not overturn Phase 2's actual conclusion (net
+   expectancy is negative in every scenario, computed independently of this
+   test), but the specific "statistically indistinguishable from random"
+   framing is weaker than originally stated. A corrected permutation null
+   is tracked as follow-up work, not done yet.
 3. **Real costs (taker/maker fees + slippage) consistently exceed the thin
    gross edge**, which is why net expectancy is negative everywhere in the
    Phase 2 report. Round-trip fees alone run roughly 14-22% of R.
@@ -82,6 +107,66 @@ zero-cost and real cost-adjusted break-even lines).
 If there's an idea for what to do about this, it belongs in a written
 proposal against CLAUDE.md section 4, not a silent parameter change.
 
+## Timeframe doesn't rescue it (Phase 2b)
+
+Phase 2's diagnosis suggested a candidate explanation for the cost problem:
+5m is high-turnover, so fixed per-trade costs eat a large fraction of a
+typically tight stop. Phase 2b tested whether a slower timeframe - wider
+stops, same fixed costs as a smaller fraction of R - has a real edge, by
+replaying the exact same frozen rule set (CLAUDE.md section 4, unmodified)
+on 15m, 1H, and 4H candles, alongside a 5m rerun of the permutation test at
+1000 trials (up from Phase 2's 100) for a consistent comparison.
+
+Full pre-registered criteria: [`docs/hypothesis-2b.md`](docs/hypothesis-2b.md).
+Full per-timeframe results: [`docs/phase2b-results.md`](docs/phase2b-results.md).
+
+**Result: none of the four timeframes pass**, but read the audit caveat
+below before trusting *why* - an earlier draft of this conclusion leaned on
+a permutation test that turned out to be unreliable.
+
+| Timeframe | Net E[R] in/out-of-sample | Out-of-sample n | Fails on |
+|---|---|---|---|
+| 5m | -0.181R / -0.217R | 155 | criterion 1 (negative both sides) |
+| 15m | -0.042R / +0.043R | 351 | criterion 1 (in-sample negative) |
+| 1H | +0.084R / +0.041R | 84 | criterion 4 (n < 100) |
+| 4H | -0.233R / +0.090R | 19 | criteria 1 and 4 |
+
+**Audit caveat (per CLAUDE.md section 7, before this was reported as
+final):** the `auditor` subagent found that the permutation test used for
+criterion 3 (gross win rate vs. a 1000-trial random-direction null) is
+built on a flawed null - `src/randomBaseline.ts` drops almost every anchor
+where the opposite direction is geometrically valid after three consecutive
+strong candles (0% of anchors at 1H/4H, <1% at 15m/5m), so each "trial" is
+close to a random ~50% subsample of the system's own real trades, not a
+genuine coin-flip baseline. This invalidated the original claim that 1H's
+positive net expectancy was "no better than a coin flip" - that specific
+reasoning has been withdrawn. **The bottom-line verdict is unaffected**:
+criteria 1 and 4 (unaffected by this bug) independently fail every
+timeframe on their own, as shown in the table above. 1H remains the one
+near-miss - positive net expectancy both in-sample and out-of-sample, the
+only timeframe where that happens - but fails on out-of-sample sample size
+alone (n=84 against a 100-trade floor), not on the disputed permutation
+result. A corrected permutation null has been flagged as separate follow-up
+work, not done here. Full detail, including the mechanism evidence (cost
+drag shrinking from +5.7/+10.4pp on 5m to +0.3/+0.5pp on 4H as timeframe
+widens) and every other audit finding: [`docs/phase2b-results.md`](docs/phase2b-results.md).
+
+Multiple-testing disclosure: 4 timeframes were tested, so a Bonferroni
+correction (95th -> 98.75th percentile) was checked for any timeframe's
+gross win rate that cleared the raw 95th-percentile bar of its own
+permutation null. None did, so the correction changed no conclusion - there
+was nothing to correct away. (This check itself inherits the same null-
+construction caveat above and is now a secondary disclosure, not
+load-bearing.)
+
+**This closes the timeframe question per the pre-registered reporting
+rule**: this pattern does not clear the pre-registered bar on any tested
+timeframe. That is a narrower claim than "no edge exists anywhere" - 1H's
+near-miss is gated on sample size, not resolved - but it is enough to say
+no further timeframes will be tried on the strength of "maybe a different
+one works." CLAUDE.md section 4 was not modified, in any letter, by this
+phase.
+
 ## Spec summary
 
 Instrument `DOT-USDT-SWAP`, 5m closed candles only, cross margin, 50x
@@ -101,15 +186,23 @@ CLAUDE.md - this paragraph is intentionally incomplete.
 ```
 src/
   types.ts              Candle/Signal types, at() (throwing array index), shared time constants
+  barInterval.ts          Bar (timeframe) type and SUPPORTED_BARS ("1m"/"5m"/"15m"/"1H"/"4H"), barIntervalMs() -
+                           the OKX bar string doubles as the CLI value, the candle filename suffix, and the
+                           lookup key, so no translation layer between them
   okxClient.ts           Low-level OKX REST client: candles, instrument spec, funding rate history (retry/backoff)
 
-  fetchData.ts            CLI: fetch/resume 5m and 1m candle history to data/*.json
-  fetchInstrument.ts       CLI: fetch and cache the live instrument spec (ctVal/lotSz/minSz/tickSz/lever)
-  fetchFundingHistory.ts   CLI: fetch and cache available OKX funding-rate-history (limited retention)
-  validateData.ts          CLI: report duplicates/gaps/out-of-order/OHLC violations in cached candle data
+  fetchData.ts            CLI: fetch/resume candle history to data/*.json for any bar in SUPPORTED_BARS
+                           (--bar 5m|15m|1H|4H|1m|both; "both" keeps the original 5m+1m pairing)
+  fetchInstrument.ts       CLI: fetch and cache the live instrument spec (ctVal/lotSz/minSz/tickSz/lever) -
+                           timeframe-independent, one cached file serves every bar
+  fetchFundingHistory.ts   CLI: fetch and cache available OKX funding-rate-history (limited retention) -
+                           also timeframe-independent
+  validateData.ts          CLI: report duplicates/gaps/out-of-order/OHLC violations for every bar found on
+                           disk (loops SUPPORTED_BARS, skips whichever files don't exist)
   dataIntegrity.ts         validateCandles(), splitIntoContiguousSegments() - used by validateData and the backtest
 
-  signal.ts                computeSignal(): the frozen signal rule, pure (Candle[]) -> Signal | null
+  signal.ts                computeSignal(): the frozen signal rule, pure (Candle[]) -> Signal | null -
+                           bar-count based (500-bar warmup, 3-bar pattern), so it needs no timeframe changes
   signalScan.ts             generateSignals(): slides computeSignal across a contiguous segment
   tradeSequencer.ts         sequenceTrades(): one-position-at-a-time sequencing with real TP/SL touch semantics
                              (used by analyze.ts; backtestEngine.ts has its own equity-aware version, see below)
@@ -123,11 +216,16 @@ src/
   format.ts                  pct/usd/num number-formatting helpers shared by backtest.ts and diagnose.ts
   backtestEngine.ts          The Phase 2 engine: signal prep, per-scenario equity-aware simulation
                              (runScenario), and metrics (computeMetrics, splitMetrics). Pure - no file I/O.
-  backtest.ts                CLI: loads data + spec, runs every {slippage x ambiguous-bound x fee-model}
-                             scenario through backtestEngine.ts, prints the report, writes data/backtest-*.
+                             prepareData() takes the candle interval explicitly (no default) so a non-5m
+                             timeframe can't silently segment on the wrong interval.
+  backtest.ts                CLI: --bar (default 5m) selects the timeframe; loads that bar's data + the
+                             shared spec, runs every {slippage x ambiguous-bound x fee-model} scenario through
+                             backtestEngine.ts, prints the report, writes data/backtest-report[-<bar>].txt and
+                             data/backtest-results[-<bar>].json (5m keeps its original unsuffixed filenames).
 
-  analyze.ts                 CLI: Phase 1 measurement (signal counts, SL-distance distribution, survival
-                             count) - a lighter-weight tool than backtest.ts, no fees/sizing/equity.
+  analyze.ts                 CLI: --bar (default 5m) Phase 1 measurement (signal counts, SL-distance
+                             distribution, survival count) - a lighter-weight tool than backtest.ts, no
+                             fees/sizing/equity.
 
   randomBaseline.ts          Permutation-test null hypothesis: buildDirectionalVariants() reconstructs
                              both a forced-long and forced-short version of every real signal anchor
@@ -135,10 +233,12 @@ src/
                              coin-flip-chosen mix through the real runScenario(), unmodified, so "same
                              engine, same structure, only direction randomized" is structurally true,
                              not just asserted. Seeded (mulberry32) for reproducibility.
-  diagnose.ts                 CLI: root-cause diagnosis - CSV sample export, gross (pre-cost) expectancy,
-                             the permutation test, and year/side/SL-quartile/hour-of-day breakdowns.
-                             Writes data/signal-sample-3days.csv, data/diagnosis-report.txt,
-                             data/diagnosis-results.json.
+  diagnose.ts                 CLI: --bar (default 5m) and --trials (default 100) - root-cause diagnosis:
+                             CSV sample export, gross (pre-cost) expectancy, the permutation test (plus its
+                             raw-95th and Bonferroni-adjusted-98.75th pass bars for the current
+                             multi-timeframe test count), and year/side/SL-quartile/hour-of-day breakdowns.
+                             Writes data/signal-sample-3days[-<bar>].csv, data/diagnosis-report[-<bar>].txt,
+                             data/diagnosis-results[-<bar>].json (5m keeps its original unsuffixed filenames).
   svg.ts                      Minimal dependency-free SVG chart primitives (scales, axes, lines, bars) -
                              not a general library, just enough for charts.ts.
   charts.ts                   CLI: renders data/equity-curve.svg, data/r-multiple-histogram.svg,
@@ -213,7 +313,7 @@ npm test                     # node:test over every src/*.test.ts
 
 ```bash
 npm run fetch-data                        # resume/extend 5m and 1m history backward (default: both bars)
-npm run fetch-data -- --bar 5m            # only 5m (also: --bar 1m, --bar both)
+npm run fetch-data -- --bar 5m            # only 5m (also: --bar 1m, --bar 15m, --bar 1H, --bar 4H, --bar both)
 npm run fetch-data -- --from 2021-01-01   # anchor a fresh fetch (ignored once data already exists to resume from)
 npm run fetch-data -- --to 2021-06-01
 npm run fetch-data -- --forward           # catch up to now from whatever is already on disk (cannot combine with --from/--to)
@@ -225,12 +325,19 @@ npm run fetch-funding-history  # fetch and cache available funding-rate-history 
 ```
 
 ```bash
-npm run validate     # integrity report for data/DOT-USDT-SWAP-{5m,1m}.json
-npm run analyze       # Phase 1 measurement report (signal counts, SL-distance distribution, survival count)
-npm run backtest       # Phase 2 full backtest: all scenarios, in-sample/out-of-sample, writes data/backtest-*
-npm run diagnose        # root-cause diagnosis: CSV sample, gross expectancy, permutation test, breakdowns
-npm run charts            # renders the three SVG charts described above into data/
+npm run validate     # integrity report for every data/DOT-USDT-SWAP-<bar>.json found on disk (1m/5m/15m/1H/4H)
+npm run analyze -- --bar 5m       # Phase 1 measurement report (signal counts, SL-distance, survival count); default --bar 5m
+npm run backtest -- --bar 1H       # Phase 2 full backtest: all scenarios, in-sample/out-of-sample; default --bar 5m
+npm run diagnose -- --bar 1H --trials 1000  # root-cause diagnosis + permutation test; default --bar 5m --trials 100
+npm run charts            # renders the three SVG charts described above into data/ (5m only)
 ```
+
+`analyze`, `backtest`, and `diagnose` all take `--bar` (default `5m`); `backtest`
+and `diagnose` write `5m`'s output to the original unsuffixed filenames and
+every other timeframe to `<name>-<bar>.<ext>`, so a non-5m run never
+overwrites Phase 2's completed 5m artifacts. See
+[`docs/phase2b-results.md`](docs/phase2b-results.md) for how this was used
+to test 15m/1H/4H in Phase 2b.
 
 `fetch-data`, `fetch-instrument`, and `fetch-funding-history` only hit
 public, unauthenticated OKX endpoints - no API keys are needed for anything

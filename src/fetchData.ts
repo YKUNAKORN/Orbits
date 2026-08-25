@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { at, type Candle } from "./types.js";
 import { fetchHistoryCandlesPage, parseRow, REQUEST_INTERVAL_MS } from "./okxClient.js";
+import { isBar, SUPPORTED_BARS, type Bar } from "./barInterval.js";
 
 const INST_ID = "DOT-USDT-SWAP";
 const MAX_PAGES = 50_000;
@@ -156,14 +157,14 @@ async function fetchNewest(instId: string, bar: string): Promise<void> {
 }
 
 interface Cli {
-  bar: "5m" | "1m" | "both";
+  bar: Bar | "both";
   from?: number;
   to?: number;
   forward: boolean;
 }
 
 function parseArgs(argv: readonly string[]): Cli {
-  let bar: "5m" | "1m" | "both" = "both";
+  let bar: Bar | "both" = "both";
   let from: number | undefined;
   let to: number | undefined;
   let forward = false;
@@ -172,8 +173,8 @@ function parseArgs(argv: readonly string[]): Cli {
     const arg = at(argv, i);
     if (arg === "--bar") {
       const value = argv[i + 1];
-      if (value !== "5m" && value !== "1m" && value !== "both") {
-        throw new Error(`--bar must be 5m, 1m, or both (got ${String(value)})`);
+      if (value === undefined || (value !== "both" && !isBar(value))) {
+        throw new Error(`--bar must be one of: both, ${SUPPORTED_BARS.join(", ")} (got ${String(value)})`);
       }
       bar = value;
       i += 1;
@@ -214,6 +215,10 @@ async function run(): Promise<void> {
       console.log(`Fetching newest ${INST_ID} 1m...`);
       await fetchNewest(INST_ID, "1m");
     }
+    if (cli.bar !== "5m" && cli.bar !== "1m" && cli.bar !== "both") {
+      console.log(`Fetching newest ${INST_ID} ${cli.bar}...`);
+      await fetchNewest(INST_ID, cli.bar);
+    }
     return;
   }
 
@@ -231,6 +236,11 @@ async function run(): Promise<void> {
     }
     console.log(`Fetching ${INST_ID} 1m...`);
     await fetchResumable(INST_ID, "1m", { fromTs, toTs });
+  }
+
+  if (cli.bar !== "5m" && cli.bar !== "1m" && cli.bar !== "both") {
+    console.log(`Fetching ${INST_ID} ${cli.bar}...`);
+    await fetchResumable(INST_ID, cli.bar, { fromTs: cli.from, toTs: cli.to });
   }
 }
 

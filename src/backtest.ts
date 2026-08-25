@@ -21,8 +21,10 @@ import {
   type PreparedData,
   type SplitMetrics,
 } from "./backtestEngine.js";
+import { barIntervalMs, isBar, SUPPORTED_BARS, type Bar } from "./barInterval.js";
 
 const INST_ID = "DOT-USDT-SWAP";
+const DEFAULT_BAR: Bar = "5m";
 const STARTING_EQUITY_USDT = 100;
 // 5% materiality bar for bothering to model funding cost at all. This is
 // NOT in CLAUDE.md - CLAUDE.md section 4 says only "full P&L with fees,
@@ -44,6 +46,23 @@ const DATA_DIR = path.join(__dirname, "..", "data");
 function loadCandles(bar: string): Candle[] {
   const raw = readFileSync(path.join(DATA_DIR, `${INST_ID}-${bar}.json`), "utf8");
   return JSON.parse(raw) as Candle[];
+}
+
+function parseBarArg(argv: readonly string[]): Bar {
+  const idx = argv.indexOf("--bar");
+  if (idx === -1) return DEFAULT_BAR;
+  const value = argv[idx + 1];
+  if (value === undefined || !isBar(value)) {
+    throw new Error(`--bar must be one of: ${SUPPORTED_BARS.join(", ")} (got ${String(value)})`);
+  }
+  return value;
+}
+
+// The 5m outputs keep their original, unsuffixed filenames (Phase 2's
+// already-completed artifact) - every other timeframe gets its own
+// bar-suffixed files so a Phase 2b run never overwrites Phase 2's report.
+function outputFileName(base: string, ext: string, bar: Bar): string {
+  return bar === "5m" ? `${base}.${ext}` : `${base}-${bar}.${ext}`;
 }
 
 interface ScenarioLabel {
@@ -169,16 +188,17 @@ function main(): void {
     console.log(line);
   };
 
+  const bar = parseBarArg(process.argv.slice(2));
   const spec = loadInstrumentSpec(INST_ID);
-  const candles = loadCandles("5m");
+  const candles = loadCandles(bar);
   if (candles.length === 0) {
-    console.log("No 5m candles found in data/. Run fetch-data first.");
+    console.log(`No ${bar} candles found in data/. Run fetch-data first.`);
     return;
   }
   const first = at(candles, 0);
   const last = at(candles, candles.length - 1);
 
-  log("=== DOT-USDT-SWAP 5m backtest (Phase 2) ===");
+  log(`=== DOT-USDT-SWAP ${bar} backtest ===`);
   log(`Data: ${candles.length} candles, ${new Date(first.ts).toISOString()} -> ${new Date(last.ts).toISOString()}`);
   log(
     `Instrument spec: ctVal=${spec.ctVal} ${spec.ctValCcy}, lotSz=${spec.lotSz}, minSz=${spec.minSz}, tickSz=${spec.tickSz}, lever=${spec.lever}x`,
@@ -187,7 +207,7 @@ function main(): void {
   log("");
 
   const t0 = Date.now();
-  const prepared = prepareData(candles, spec);
+  const prepared = prepareData(candles, spec, barIntervalMs(bar));
   const prepMs = Date.now() - t0;
   log(`Signals generated: ${prepared.totalSignalCount} (prepare took ${prepMs}ms)`);
   log(`Contiguous segments: ${prepared.segments.length}`);
@@ -291,12 +311,13 @@ function main(): void {
   log(`Total backtest time: ${totalMs}ms`);
 
   const outDir = DATA_DIR;
-  const jsonPath = path.join(outDir, "backtest-results.json");
+  const jsonPath = path.join(outDir, outputFileName("backtest-results", "json", bar));
   writeFileSync(
     jsonPath,
     JSON.stringify(
       {
         generatedAt: new Date().toISOString(),
+        bar,
         dataRange: { from: first.ts, to: last.ts, candleCount: candles.length },
         instrumentSpec: spec,
         startingEquityUsdt: STARTING_EQUITY_USDT,
@@ -313,7 +334,7 @@ function main(): void {
   );
   log(`Full per-scenario metrics written to ${jsonPath}`);
 
-  const reportPath = path.join(outDir, "backtest-report.txt");
+  const reportPath = path.join(outDir, outputFileName("backtest-report", "txt", bar));
   writeFileSync(reportPath, report.join("\n") + "\n");
   console.log(`Report written to ${reportPath}`);
 }
