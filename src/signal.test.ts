@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { at, type Candle } from "./types.js";
-import { computeSignal } from "./signal.js";
+import { computeSignal, type EmaPeriods } from "./signal.js";
 
 function makeCandle(ts: number, open: number, high: number, low: number, close: number): Candle {
   return { ts, open, high, low, close, volume: 1 };
@@ -118,6 +118,43 @@ test("guard rejects a signal where SL lands on the wrong side of entry", () => {
   // sanity: this really is the degenerate case under test (sl >= entry)
   assert.ok(bar2.low >= bar0.close, "test setup: expected bar2.low >= bar0.close");
   assert.equal(computeSignal(candles), null);
+});
+
+test("explicit default periods {12, 26, 100} produce identical output to omitting the parameter", () => {
+  const base = rampWarmup(500, 5, 10);
+  const lastTs = at(base, base.length - 1).ts;
+  const bar2 = makeCandle(lastTs + 300_000, 10, 10.5, 9.8, 10.4);
+  const bar1 = makeCandle(lastTs + 600_000, 10.4, 11.0, 10.3, 10.9);
+  const bar0 = makeCandle(lastTs + 900_000, 10.9, 11.6, 10.85, 11.5);
+  const candles = [...base, bar2, bar1, bar0];
+
+  const explicit: EmaPeriods = { fast: 12, mid: 26, slow: 100 };
+  assert.deepEqual(computeSignal(candles, explicit), computeSignal(candles));
+});
+
+test("custom EMA periods are wired to the correct fast/mid/slow slots, not just accepted and ignored", () => {
+  // Same fixture as "long signal: 3 strong up bars after an uptrend" above,
+  // which fires a long signal under the default (correctly-ordered)
+  // fast<mid<slow periods. A shorter EMA period has less lag, so in a
+  // monotonic uptrend it sits closer to current price - that's why
+  // eFast > eMid > eSlow holds for 12 < 26 < 100. Swapping the fast and slow
+  // period VALUES (passing period 100 into the "fast" slot and period 12
+  // into the "slow" slot) inverts which computed EMA has the least lag,
+  // which flips eFast > eMid to false and kills the long signal - a
+  // deliberately unrealistic period assignment, chosen because the
+  // inversion is analytically guaranteed to flip the result on a monotonic
+  // ramp regardless of the exact prices used, proving the three periods are
+  // threaded to the right EMA slots rather than silently ignored.
+  const base = rampWarmup(500, 5, 10);
+  const lastTs = at(base, base.length - 1).ts;
+  const bar2 = makeCandle(lastTs + 300_000, 10, 10.5, 9.8, 10.4);
+  const bar1 = makeCandle(lastTs + 600_000, 10.4, 11.0, 10.3, 10.9);
+  const bar0 = makeCandle(lastTs + 900_000, 10.9, 11.6, 10.85, 11.5);
+  const candles = [...base, bar2, bar1, bar0];
+
+  assert.ok(computeSignal(candles), "sanity: default periods fire a signal on this fixture");
+  const inverted: EmaPeriods = { fast: 100, mid: 26, slow: 12 };
+  assert.equal(computeSignal(candles, inverted), null);
 });
 
 test("a gap between pattern bars produces no signal even though the OHLC would otherwise qualify", () => {

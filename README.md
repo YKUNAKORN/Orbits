@@ -47,21 +47,36 @@ this file is stale.
   "Timeframe doesn't rescue it" below and
   [`docs/phase2b-results.md`](docs/phase2b-results.md) for the full
   per-timeframe breakdown. CLAUDE.md section 4 is unchanged by this phase.
+- **EMA filter hypothesis (7/30/99): done, fails.** A standalone side test,
+  not a phase and not a spec proposal - does moving the EMA trend-filter
+  periods from 12/26/100 to 7/30/99 flip 5m net expectancy positive? No:
+  gross win rate lift is +0.05pp overall (statistically indistinguishable
+  from noise, and negative out-of-sample on its own), net expectancy stays
+  negative on both sides of the split. CLAUDE.md section 4 is unmodified.
+  See "EMA filter hypothesis (7/30/99): fails" below and
+  [`docs/hypothesis-ema-filter.md`](docs/hypothesis-ema-filter.md).
 - **Phase 3 (Paper trade): not started.** Per CLAUDE.md's phase discipline,
   this does not start until there is a reason to believe Phase 2 would pass
   - it currently does not.
 - **Phase 4 (Live) and Phase 5 (Dashboard): not started.**
-- **Measurement tooling follow-up (2026-08-25): implemented, not yet re-run.**
+- **Measurement tooling follow-up (2026-08-25): implemented; fixed-risk
+  sizing now exercised against real data, permutation redesign still not.**
   Added a fixed-risk sizing mode (avoids the equity-compounding truncation
   described below) and redesigned the permutation null to randomize entry
   timing instead of direction (the old direction-flip null was found
-  geometrically broken by the auditor - see below). Both are unit-tested but
-  could not be run against real data in the session that built them: this
-  environment's network egress cannot reach OKX, and `data/` is gitignored
-  and was not present in the fresh container. See "Fixed-risk measurement
-  mode and the entry-timing permutation redesign" below for full detail and
-  the commands to produce real numbers once data is available. Every number
-  elsewhere in this README predates this change.
+  geometrically broken by the auditor - see below). Both were unit-tested
+  but, at the time this bullet was first written, could not be run against
+  real data: this environment's network egress could not reach OKX, and
+  `data/` was gitignored and not present in that session's fresh container.
+  **Update 2026-08-26:** the fixed-risk sizing mode has since been run
+  against real cached 5m data by the EMA filter hypothesis test below (which
+  needed an untruncated sample to compare two EMA period sets) - see "EMA
+  filter hypothesis (7/30/99): fails" below. The entry-timing permutation
+  redesign (`randomBaseline.ts`, `diagnose.ts`'s Step 3) is still unexercised
+  against real data; that half of this bullet's original caveat still
+  stands. See "Fixed-risk measurement mode and the entry-timing permutation
+  redesign" below for full detail and the commands to produce real
+  permutation numbers.
 
 ## Why Phase 2 is negative
 
@@ -185,6 +200,34 @@ no further timeframes will be tried on the strength of "maybe a different
 one works." CLAUDE.md section 4 was not modified, in any letter, by this
 phase.
 
+## EMA filter hypothesis (7/30/99): fails
+
+A separate, standalone hypothesis test (not Phase 2c, not a spec proposal):
+does changing the 5m signal's EMA trend-filter periods from 12/26/100 to
+7/30/99 raise the gross win rate enough to flip net expectancy positive?
+Tested with `computeSignal`'s EMA periods now parameterized (default stays
+12/26/100 everywhere else in this codebase, unmodified), fixed-risk sizing
+for both EMA sets (so neither side's sample gets truncated by equity
+compounding), same 5m data, same engine, same execution policy as CLAUDE.md
+section 4.
+
+Full pre-registered criteria and results:
+[`docs/hypothesis-ema-filter.md`](docs/hypothesis-ema-filter.md).
+
+**Result: fails.** The measured baseline gross win rate (34.48%) matched the
+cited reference figure exactly. The hypothesis's gross win rate was 34.53% -
+a +0.05pp lift, statistically indistinguishable from noise (two-proportion
+z-test: z=0.049, p=0.961) - and the lift didn't even hold up out-of-sample
+(+0.17pp in-sample, **-0.20pp out-of-sample**). Net expectancy stayed
+negative on both sides of the 70/30 split (in-sample -0.104R, out-of-sample
+-0.093R), failing the pre-registered criteria on both the in-sample and
+out-of-sample legs. Changing these three EMA periods does not meaningfully
+change how often the 3-strong-candle pattern fires or how the trend filter
+gates it; the ~3-3.5 percentage point gap between break-even win rate
+(~37.8%) and achieved win rate is essentially unaffected. Per the task's
+explicit instruction, CLAUDE.md section 4 is unmodified by this result in
+any letter, and no further EMA period combinations were tried.
+
 ## Fixed-risk measurement mode and the entry-timing permutation redesign
 
 Two follow-up changes to the measurement tooling, added 2026-08-25 - neither
@@ -289,8 +332,11 @@ src/
                            disk (loops SUPPORTED_BARS, skips whichever files don't exist)
   dataIntegrity.ts         validateCandles(), splitIntoContiguousSegments() - used by validateData and the backtest
 
-  signal.ts                computeSignal(): the frozen signal rule, pure (Candle[]) -> Signal | null -
-                           bar-count based (500-bar warmup, 3-bar pattern), so it needs no timeframe changes
+  signal.ts                computeSignal(): the frozen signal rule, pure (Candle[], EmaPeriods?) -> Signal | null -
+                           bar-count based (500-bar warmup, 3-bar pattern), so it needs no timeframe changes.
+                           EmaPeriods defaults to {12,26,100} (CLAUDE.md section 4); a non-default value is
+                           only ever passed from hypothesisEmaFilter.ts (below), never the live bot or the
+                           canonical (--bar, default sizing) backtest
   signalScan.ts             generateSignals(): slides computeSignal across a contiguous segment
   tradeSequencer.ts         sequenceTrades(): one-position-at-a-time sequencing with real TP/SL touch semantics
                              (used by analyze.ts; backtestEngine.ts has its own equity-aware version, see below)
@@ -344,6 +390,11 @@ src/
                              data/diagnosis-results[-<bar>].json (5m keeps its original unsuffixed filenames).
   svg.ts                      Minimal dependency-free SVG chart primitives (scales, axes, lines, bars) -
                              not a general library, just enough for charts.ts.
+  hypothesisEmaFilter.ts       CLI (no args, 5m only): standalone comparison of EMA 12/26/100 (baseline)
+                             vs EMA 7/30/99 (hypothesis), fixed-risk sizing for both, canonical cost
+                             scenario. Not part of the frozen pipeline - see "EMA filter hypothesis
+                             (7/30/99): fails" above and docs/hypothesis-ema-filter.md. Writes
+                             data/hypothesis-ema-filter-report.txt and the matching .json.
   charts.ts                   CLI: renders data/equity-curve.svg, data/r-multiple-histogram.svg,
                              data/monthly-win-rate.svg from the canonical scenario.
 
@@ -435,6 +486,7 @@ npm run backtest -- --sizing fixed         # same, but measurement-only flat-ris
 npm run backtest:fixed-risk                # shorthand for the line above, --bar 5m
 npm run diagnose -- --bar 1H --trials 1000  # root-cause diagnosis + entry-timing permutation test; default --bar 5m --trials 100
 npm run charts            # renders the three SVG charts described above into data/ (5m only)
+npm run hypothesis:ema-filter   # standalone EMA 12/26/100 vs 7/30/99 comparison (5m only, fixed-risk sizing) - see above
 ```
 
 `analyze`, `backtest`, and `diagnose` all take `--bar` (default `5m`); `backtest`
