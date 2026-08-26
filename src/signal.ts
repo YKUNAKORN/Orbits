@@ -6,6 +6,17 @@ const EMA_SLOW = 100;
 // 500 bars: (1 - 2/101)^500 ~= 5e-5, so a fresh EMA100 seed's error is negligible by then.
 const MIN_WARMUP_BARS = 500;
 
+// CLAUDE.md section 4's frozen periods. Overridable per computeSignal call
+// (see EmaPeriods below) for standalone hypothesis tests only - the frozen
+// spec itself never passes anything but this default.
+export interface EmaPeriods {
+  fast: number;
+  mid: number;
+  slow: number;
+}
+
+const DEFAULT_EMA_PERIODS: EmaPeriods = { fast: EMA_FAST, mid: EMA_MID, slow: EMA_SLOW };
+
 function ema(values: readonly number[], period: number): number[] {
   const k = 2 / (period + 1);
   const out = new Array<number>(values.length);
@@ -45,15 +56,18 @@ function hasConsistentSpacing(window: readonly Candle[]): boolean {
 // candles must be oldest-to-newest; the last element is bar[0], the signal bar.
 // Only the trailing MIN_WARMUP_BARS are used, so the result is the same
 // regardless of how much extra history the caller happens to pass in.
-export function computeSignal(candles: readonly Candle[]): Signal | null {
+// emaPeriods defaults to CLAUDE.md section 4's frozen 12/26/100 - passing a
+// non-default value is only ever done from a standalone hypothesis-test
+// script, never from the live bot or the canonical backtest.
+export function computeSignal(candles: readonly Candle[], emaPeriods: EmaPeriods = DEFAULT_EMA_PERIODS): Signal | null {
   if (candles.length < MIN_WARMUP_BARS) return null;
   const window = candles.length > MIN_WARMUP_BARS ? candles.slice(candles.length - MIN_WARMUP_BARS) : candles;
   if (!hasConsistentSpacing(window)) return null;
 
   const closes = window.map((c) => c.close);
-  const emaFast = ema(closes, EMA_FAST);
-  const emaMid = ema(closes, EMA_MID);
-  const emaSlow = ema(closes, EMA_SLOW);
+  const emaFast = ema(closes, emaPeriods.fast);
+  const emaMid = ema(closes, emaPeriods.mid);
+  const emaSlow = ema(closes, emaPeriods.slow);
 
   const last = window.length - 1;
   const bar0 = at(window, last);

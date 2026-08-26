@@ -1,6 +1,7 @@
 import { at, type Candle, type Side, type Signal } from "./types.js";
 import { splitIntoContiguousSegments } from "./dataIntegrity.js";
 import { generateSignals } from "./signalScan.js";
+import type { EmaPeriods } from "./signal.js";
 import type { PositionSizingResult } from "./positionSizing.js";
 import type { InstrumentSpec } from "./instrumentSpec.js";
 import { countFundingCrossings } from "./funding.js";
@@ -128,9 +129,12 @@ export function computeNaturalResolutions(
 // value from barInterval.ts) - required explicitly rather than defaulted,
 // so a caller backtesting a non-5m timeframe can't silently segment on the
 // wrong interval and manufacture phantom gaps (or hide real ones).
-export function prepareData(candles: readonly Candle[], spec: InstrumentSpec, intervalMs: number): PreparedData {
+// emaPeriods is forwarded as-is to generateSignals/computeSignal (undefined
+// -> CLAUDE.md section 4's frozen 12/26/100) - only a standalone
+// hypothesis-test script ever passes a non-default value.
+export function prepareData(candles: readonly Candle[], spec: InstrumentSpec, intervalMs: number, emaPeriods?: EmaPeriods): PreparedData {
   const segments = splitIntoContiguousSegments(candles, intervalMs);
-  const signalsBySegment = segments.map((segment) => generateSignals(segment));
+  const signalsBySegment = segments.map((segment) => generateSignals(segment, emaPeriods));
   const naturalResolutionsBySegment = segments.map((segment, i) =>
     computeNaturalResolutions(segment, at(signalsBySegment, i), spec.tickSz),
   );

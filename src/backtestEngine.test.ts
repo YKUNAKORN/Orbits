@@ -2,11 +2,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Candle, Signal } from "./types.js";
 import type { InstrumentSpec } from "./instrumentSpec.js";
+import type { EmaPeriods } from "./signal.js";
 import { computeFixedRiskPositionSize, computePositionSize, FIXED_RISK_USDT_FOR_MEASUREMENT } from "./positionSizing.js";
 import {
   computeNaturalResolutions,
   computeMetrics,
   computeSplitTs,
+  prepareData,
   runScenario,
   splitMetrics,
   type BacktestConfig,
@@ -237,6 +239,41 @@ test("fixed-risk sizing mode: contract size does not move with accumulated P&L (
   assertClose(second.targetRiskUsdt, first.targetRiskUsdt); // ...but the sizing target never moves with it
   assert.equal(first.contracts, 4);
   assert.equal(second.contracts, first.contracts); // identical SL distance -> identical contracts, unlike compounding
+});
+
+test("prepareData threads custom EMA periods through to signal generation", () => {
+  // 500-bar monotonic warmup ramp (every bar is "strong up" by construction,
+  // same trick signal.test.ts's rampWarmup uses) plus 3 more strong-up bars.
+  // Under DEFAULT periods (fast<mid<slow, less lag = higher value in an
+  // uptrend), the EMA stack eventually satisfies eFast>eMid>eSlow and fires
+  // at least one long signal somewhere as the window slides. Under an
+  // INVERTED period assignment (period 100 in the "fast" slot, period 12 in
+  // the "slow" slot), the least-lag EMA is always the one written into
+  // eSlow, so eFast>eMid>eSlow can never hold anywhere in a monotonic ramp,
+  // and every bar is strong UP (never down), so shortTrend's bars never
+  // qualify either - zero signals, deterministically. This proves
+  // prepareData (and the generateSignals/computeSignal calls inside it)
+  // actually forwards the emaPeriods argument rather than ignoring it.
+  const warmupCount = 500;
+  const step = (10 - 5) / warmupCount;
+  const candles: Candle[] = [];
+  let price = 5;
+  for (let i = 0; i < warmupCount; i++) {
+    const open = price;
+    const close = price + step;
+    candles.push(candle(i, open, Math.max(open, close) + step * 0.1, Math.min(open, close) - step * 0.1, close));
+    price = close;
+  }
+  candles.push(candle(warmupCount, 10, 10.5, 9.8, 10.4));
+  candles.push(candle(warmupCount + 1, 10.4, 11.0, 10.3, 10.9));
+  candles.push(candle(warmupCount + 2, 10.9, 11.6, 10.85, 11.5));
+
+  const defaultPrepared = prepareData(candles, SPEC, STEP);
+  assert.ok(defaultPrepared.totalSignalCount > 0, "sanity: default periods fire at least one signal on this fixture");
+
+  const inverted: EmaPeriods = { fast: 100, mid: 26, slow: 12 };
+  const invertedPrepared = prepareData(candles, SPEC, STEP, inverted);
+  assert.equal(invertedPrepared.totalSignalCount, 0);
 });
 
 test("computeSplitTs divides the range at the given fraction (default 70%)", () => {
