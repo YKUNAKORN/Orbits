@@ -7,6 +7,7 @@ import { countFundingCrossings } from "./funding.js";
 import { fundingHistoryCachePath, type FundingRateRecord } from "./fetchFundingHistory.js";
 import { mean } from "./stats.js";
 import { num, pct, usd } from "./format.js";
+import { computeFixedRiskPositionSize, computePositionSize, FIXED_RISK_USDT_FOR_MEASUREMENT } from "./positionSizing.js";
 import {
   DEFAULT_MAKER_FEE_RATE,
   DEFAULT_TAKER_FEE_RATE,
@@ -19,6 +20,7 @@ import {
   type FeeModel,
   type Metrics,
   type PreparedData,
+  type SizingFn,
   type SplitMetrics,
 } from "./backtestEngine.js";
 import { barIntervalMs, isBar, SUPPORTED_BARS, type Bar } from "./barInterval.js";
@@ -58,11 +60,30 @@ function parseBarArg(argv: readonly string[]): Bar {
   return value;
 }
 
+// "fixed" is the measurement-only mode added to check whether the frozen
+// spec's 2%-of-equity compounding is truncating the statistical sample (see
+// positionSizing.ts's computeFixedRiskPositionSize) - it is NEVER the
+// default and never touches CLAUDE.md section 4.
+type SizingArg = "compounding" | "fixed";
+
+function parseSizingArg(argv: readonly string[]): SizingArg {
+  const idx = argv.indexOf("--sizing");
+  if (idx === -1) return "compounding";
+  const value = argv[idx + 1];
+  if (value !== "compounding" && value !== "fixed") {
+    throw new Error(`--sizing must be one of: compounding, fixed (got ${String(value)})`);
+  }
+  return value;
+}
+
 // The 5m outputs keep their original, unsuffixed filenames (Phase 2's
 // already-completed artifact) - every other timeframe gets its own
 // bar-suffixed files so a Phase 2b run never overwrites Phase 2's report.
-function outputFileName(base: string, ext: string, bar: Bar): string {
-  return bar === "5m" ? `${base}.${ext}` : `${base}-${bar}.${ext}`;
+// Fixed-risk runs get an extra "-fixed-risk" tag so they never collide with
+// the canonical compounding artifacts on any bar, including 5m.
+function outputFileName(base: string, ext: string, bar: Bar, sizing: SizingArg): string {
+  const tag = sizing === "fixed" ? `${base}-fixed-risk` : base;
+  return bar === "5m" ? `${tag}.${ext}` : `${tag}-${bar}.${ext}`;
 }
 
 interface ScenarioLabel {
@@ -75,7 +96,7 @@ function labelFor(s: ScenarioLabel): string {
   return `slip=${s.slippageTicks}t bound=${s.ambiguousBound} fee=${s.feeModel}`;
 }
 
-function buildConfig(s: ScenarioLabel, fundingRateForCost: number | null): BacktestConfig {
+function buildConfig(s: ScenarioLabel, fundingRateForCost: number | null, computeSize: SizingFn): BacktestConfig {
   return {
     startingEquityUsdt: STARTING_EQUITY_USDT,
     slippageTicks: s.slippageTicks,
@@ -84,6 +105,25 @@ function buildConfig(s: ScenarioLabel, fundingRateForCost: number | null): Backt
     takerFeeRate: DEFAULT_TAKER_FEE_RATE,
     makerFeeRate: DEFAULT_MAKER_FEE_RATE,
     fundingRateForCost,
+    computeSize,
+  };
+}
+
+// True gross (fee=0/slippage=0/funding=0) scenario - not expressible via
+// buildConfig, which always applies the real fee rates. Only used in
+// --sizing fixed runs, as the explicit "before cost" counterpart to the
+// canonical "after cost" detail block, both under the same fixed-risk sizing
+// so the only thing that differs between them is cost.
+function buildGrossConfig(computeSize: SizingFn): BacktestConfig {
+  return {
+    startingEquityUsdt: STARTING_EQUITY_USDT,
+    slippageTicks: 0,
+    ambiguousBound: "lower",
+    feeModel: "limit-tp",
+    takerFeeRate: 0,
+    makerFeeRate: 0,
+    fundingRateForCost: null,
+    computeSize,
   };
 }
 
@@ -122,7 +162,7 @@ function printFullMetrics(title: string, m: Metrics): string[] {
   );
   lines.push(`ambiguous bars (TP and SL both touched): ${m.ambiguousCount} (${pct(m.ambiguousPctOfSample)} of sample)`);
   lines.push(
-    `actual risk after rounding, as % of 2% target: n=${m.riskDistribution.n} mean=${num(m.riskDistribution.meanPctOfTarget)}% min=${num(m.riskDistribution.minPctOfTarget)}% p10=${num(m.riskDistribution.p10PctOfTarget)}% median=${num(m.riskDistribution.medianPctOfTarget)}% p90=${num(m.riskDistribution.p90PctOfTarget)}%`,
+    `actual risk after rounding, as % of target risk: n=${m.riskDistribution.n} mean=${num(m.riskDistribution.meanPctOfTarget)}% min=${num(m.riskDistribution.minPctOfTarget)}% p10=${num(m.riskDistribution.p10PctOfTarget)}% median=${num(m.riskDistribution.medianPctOfTarget)}% p90=${num(m.riskDistribution.p90PctOfTarget)}%`,
   );
   lines.push("monthly:");
   for (const mo of m.monthly) {
@@ -173,8 +213,9 @@ function loadFundingRateSummary(instId: string): FundingRateSummary | null {
 function measureFundingCrossings(
   prepared: PreparedData,
   spec: InstrumentSpec,
+  computeSize: SizingFn,
 ): { pct: number; crossed: number; total: number } {
-  const probeConfig = buildConfig(CANONICAL, null);
+  const probeConfig = buildConfig(CANONICAL, null, computeSize);
   const run = runScenario(prepared, spec, probeConfig);
   const total = run.trades.length;
   const crossed = run.trades.filter((t) => countFundingCrossings(t.entryTs, t.exitTs) > 0).length;
@@ -189,6 +230,9 @@ function main(): void {
   };
 
   const bar = parseBarArg(process.argv.slice(2));
+  const sizingArg = parseSizingArg(process.argv.slice(2));
+  const computeSize: SizingFn =
+    sizingArg === "fixed" ? ({ entry, sl, spec: s }) => computeFixedRiskPositionSize({ entry, sl, spec: s }) : computePositionSize;
   const spec = loadInstrumentSpec(INST_ID);
   const candles = loadCandles(bar);
   if (candles.length === 0) {
@@ -198,12 +242,18 @@ function main(): void {
   const first = at(candles, 0);
   const last = at(candles, candles.length - 1);
 
-  log(`=== DOT-USDT-SWAP ${bar} backtest ===`);
+  log(`=== DOT-USDT-SWAP ${bar} backtest${sizingArg === "fixed" ? " [FIXED-RISK MEASUREMENT MODE]" : ""} ===`);
   log(`Data: ${candles.length} candles, ${new Date(first.ts).toISOString()} -> ${new Date(last.ts).toISOString()}`);
   log(
     `Instrument spec: ctVal=${spec.ctVal} ${spec.ctValCcy}, lotSz=${spec.lotSz}, minSz=${spec.minSz}, tickSz=${spec.tickSz}, lever=${spec.lever}x`,
   );
-  log(`Starting equity: ${STARTING_EQUITY_USDT} USDT, risk 2% of current equity per trade (compounding)`);
+  if (sizingArg === "fixed") {
+    log(
+      `Starting equity: ${STARTING_EQUITY_USDT} USDT (display only, NOT used for sizing). Sizing: flat ${FIXED_RISK_USDT_FOR_MEASUREMENT} USDT risk per trade, no compounding - MEASUREMENT ONLY, not the frozen spec. CLAUDE.md section 4 stays 2% of current equity for the live bot and the default (compounding) run of this script.`,
+    );
+  } else {
+    log(`Starting equity: ${STARTING_EQUITY_USDT} USDT, risk 2% of current equity per trade (compounding)`);
+  }
   log("");
 
   const t0 = Date.now();
@@ -215,7 +265,7 @@ function main(): void {
 
   // --- Funding measurement (CLAUDE.md section 4): measure first, only
   // model real cost if >=5% of trades hold across a funding settlement. ---
-  const funding = measureFundingCrossings(prepared, spec);
+  const funding = measureFundingCrossings(prepared, spec, computeSize);
   log("=== Funding exposure measurement ===");
   log(
     `${funding.crossed} / ${funding.total} trades (${pct(funding.pct)}) in the canonical scenario (${labelFor(CANONICAL)}) held open across at least one 8h funding settlement (00:00/08:00/16:00 UTC).`,
@@ -261,7 +311,7 @@ function main(): void {
 
   const results: { scenario: ScenarioLabel; split: SplitMetrics }[] = [];
   for (const scenario of scenarios) {
-    const config = buildConfig(scenario, fundingCostEnabled ? fundingRateForCost : null);
+    const config = buildConfig(scenario, fundingCostEnabled ? fundingRateForCost : null, computeSize);
     const run = runScenario(prepared, spec, config);
     const split = splitMetrics(run, STARTING_EQUITY_USDT, splitTsValue);
     results.push({ scenario, split });
@@ -307,17 +357,34 @@ function main(): void {
     log("");
   }
 
+  // Fixed-risk mode only: an explicit zero-cost scenario, so "before cost"
+  // (this block) vs "after cost" (the canonical block above) is a direct
+  // comparison under the SAME sizing - the matrix above never sets fees to
+  // exactly 0, so it can't answer that by itself.
+  let grossFixedSplit: SplitMetrics | null = null;
+  if (sizingArg === "fixed") {
+    const grossRun = runScenario(prepared, spec, buildGrossConfig(computeSize));
+    grossFixedSplit = splitMetrics(grossRun, STARTING_EQUITY_USDT, splitTsValue);
+    log(`=== Full detail: gross, before-cost scenario (fee=0, slippage=0, funding=0), fixed-risk sizing ===`);
+    log("");
+    for (const line of printFullMetrics("IN-SAMPLE", grossFixedSplit.inSample)) log(line);
+    log("");
+    for (const line of printFullMetrics("OUT-OF-SAMPLE", grossFixedSplit.outOfSample)) log(line);
+    log("");
+  }
+
   const totalMs = Date.now() - t0;
   log(`Total backtest time: ${totalMs}ms`);
 
   const outDir = DATA_DIR;
-  const jsonPath = path.join(outDir, outputFileName("backtest-results", "json", bar));
+  const jsonPath = path.join(outDir, outputFileName("backtest-results", "json", bar, sizingArg));
   writeFileSync(
     jsonPath,
     JSON.stringify(
       {
         generatedAt: new Date().toISOString(),
         bar,
+        sizingMode: sizingArg,
         dataRange: { from: first.ts, to: last.ts, candleCount: candles.length },
         instrumentSpec: spec,
         startingEquityUsdt: STARTING_EQUITY_USDT,
@@ -327,6 +394,7 @@ function main(): void {
         fundingRateForCost,
         fundingSummary,
         scenarios: results.map((r) => ({ scenario: r.scenario, inSample: r.split.inSample, outOfSample: r.split.outOfSample })),
+        ...(grossFixedSplit ? { grossFixedRisk: { inSample: grossFixedSplit.inSample, outOfSample: grossFixedSplit.outOfSample } } : {}),
       },
       null,
       2,
@@ -334,7 +402,7 @@ function main(): void {
   );
   log(`Full per-scenario metrics written to ${jsonPath}`);
 
-  const reportPath = path.join(outDir, outputFileName("backtest-report", "txt", bar));
+  const reportPath = path.join(outDir, outputFileName("backtest-report", "txt", bar, sizingArg));
   writeFileSync(reportPath, report.join("\n") + "\n");
   console.log(`Report written to ${reportPath}`);
 }

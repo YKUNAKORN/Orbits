@@ -1,7 +1,7 @@
 import { at, type Candle, type Side, type Signal } from "./types.js";
 import { splitIntoContiguousSegments } from "./dataIntegrity.js";
 import { generateSignals } from "./signalScan.js";
-import { computePositionSize, RISK_PER_TRADE } from "./positionSizing.js";
+import type { PositionSizingResult } from "./positionSizing.js";
 import type { InstrumentSpec } from "./instrumentSpec.js";
 import { countFundingCrossings } from "./funding.js";
 import { mean, monthKey, percentile, sum } from "./stats.js";
@@ -15,6 +15,14 @@ export type FeeModel = "limit-tp" | "all-taker";
 type NaturalOutcome = "tp" | "sl" | "ambiguous" | "open";
 type ResolvedOutcome = "tp" | "sl";
 
+// Injected rather than hardcoded so the engine stays agnostic to which
+// sizing formula is in effect - the frozen 2%-of-equity spec
+// (computePositionSize) or the measurement-only flat-risk mode
+// (computeFixedRiskPositionSize, see positionSizing.ts). Every caller must
+// pass one explicitly (no default) so a scenario's sizing mode is always
+// visible at its construction site, never silently assumed.
+export type SizingFn = (input: { equityUsdt: number; entry: number; sl: number; spec: InstrumentSpec }) => PositionSizingResult | null;
+
 export interface BacktestConfig {
   startingEquityUsdt: number;
   slippageTicks: number;
@@ -27,6 +35,7 @@ export interface BacktestConfig {
   // backtest.ts - this is only populated if that measurement crosses the
   // 5% materiality bar backtest.ts applies before bothering to model it).
   fundingRateForCost: number | null;
+  computeSize: SizingFn;
 }
 
 export interface ClosedTrade {
@@ -182,7 +191,7 @@ export function runScenario(prepared: PreparedData, spec: InstrumentSpec, config
         continue;
       }
 
-      const sizing = computePositionSize({ equityUsdt: equity, entry: signal.entry, sl: signal.sl, spec });
+      const sizing = config.computeSize({ equityUsdt: equity, entry: signal.entry, sl: signal.sl, spec });
       if (sizing === null) {
         skippedSizingTs.push(signal.time);
         continue; // no position opened - does not block the next signal
@@ -244,7 +253,7 @@ export function runScenario(prepared: PreparedData, spec: InstrumentSpec, config
         fundingCrossings,
         fundingUsdt,
         netPnlUsdt,
-        targetRiskUsdt: equityBefore * RISK_PER_TRADE,
+        targetRiskUsdt: sizing.targetRiskUsdt,
         actualRiskUsdt: sizing.actualRiskUsdt,
         equityBefore,
         equityAfter: equity,

@@ -12,6 +12,7 @@
     "validate": "tsx src/validateData.ts",
     "analyze": "tsx src/analyze.ts",
     "backtest": "tsx src/backtest.ts",
+    "backtest:fixed-risk": "tsx src/backtest.ts --sizing fixed",
     "diagnose": "tsx src/diagnose.ts",
     "charts": "tsx src/charts.ts"
   },

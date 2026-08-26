@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
 import { at, FIVE_MIN_MS, type Candle } from "./types.js";
 import { loadInstrumentSpec } from "./instrumentSpec.js";
+import { computePositionSize } from "./positionSizing.js";
 import { computeMetrics, computeSplitTs, prepareData, runScenario, type BacktestConfig, type ClosedTrade } from "./backtestEngine.js";
 import { addLine, addPolyline, addRect, addText, createCanvas, linearScale, plotArea, render } from "./svg.js";
 
@@ -17,6 +18,7 @@ const CANONICAL_CONFIG: BacktestConfig = {
   takerFeeRate: 0.0005,
   makerFeeRate: 0.0002,
   fundingRateForCost: null,
+  computeSize: computePositionSize,
 };
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));

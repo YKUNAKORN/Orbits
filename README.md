@@ -51,6 +51,17 @@ this file is stale.
   this does not start until there is a reason to believe Phase 2 would pass
   - it currently does not.
 - **Phase 4 (Live) and Phase 5 (Dashboard): not started.**
+- **Measurement tooling follow-up (2026-08-25): implemented, not yet re-run.**
+  Added a fixed-risk sizing mode (avoids the equity-compounding truncation
+  described below) and redesigned the permutation null to randomize entry
+  timing instead of direction (the old direction-flip null was found
+  geometrically broken by the auditor - see below). Both are unit-tested but
+  could not be run against real data in the session that built them: this
+  environment's network egress cannot reach OKX, and `data/` is gitignored
+  and was not present in the fresh container. See "Fixed-risk measurement
+  mode and the entry-timing permutation redesign" below for full detail and
+  the commands to produce real numbers once data is available. Every number
+  elsewhere in this README predates this change.
 
 ## Why Phase 2 is negative
 
@@ -82,8 +93,12 @@ RR, the EMA periods, or the strong-candle test, found:
    from luck" - it does not overturn Phase 2's actual conclusion (net
    expectancy is negative in every scenario, computed independently of this
    test), but the specific "statistically indistinguishable from random"
-   framing is weaker than originally stated. A corrected permutation null
-   is tracked as follow-up work, not done yet.
+   framing is weaker than originally stated. **Update 2026-08-25: the
+   permutation null has since been redesigned** (entry-timing randomization
+   instead of direction - see "Fixed-risk measurement mode and the
+   entry-timing permutation redesign" below) but not yet re-run against real
+   data, so the 75th-percentile figure above still stands as the last actual
+   measurement and should be read with the same caveat.
 3. **Real costs (taker/maker fees + slippage) consistently exceed the thin
    gross edge**, which is why net expectancy is negative everywhere in the
    Phase 2 report. Round-trip fees alone run roughly 14-22% of R.
@@ -146,8 +161,11 @@ timeframe on their own, as shown in the table above. 1H remains the one
 near-miss - positive net expectancy both in-sample and out-of-sample, the
 only timeframe where that happens - but fails on out-of-sample sample size
 alone (n=84 against a 100-trade floor), not on the disputed permutation
-result. A corrected permutation null has been flagged as separate follow-up
-work, not done here. Full detail, including the mechanism evidence (cost
+result. **Update 2026-08-25: the permutation null has since been redesigned**
+(see "Fixed-risk measurement mode and the entry-timing permutation redesign"
+below) but not yet re-run against real data for any timeframe, so the table
+and percentiles above still stand as the last actual measurement. Full
+detail, including the mechanism evidence (cost
 drag shrinking from +5.7/+10.4pp on 5m to +0.3/+0.5pp on 4H as timeframe
 widens) and every other audit finding: [`docs/phase2b-results.md`](docs/phase2b-results.md).
 
@@ -166,6 +184,76 @@ near-miss is gated on sample size, not resolved - but it is enough to say
 no further timeframes will be tried on the strength of "maybe a different
 one works." CLAUDE.md section 4 was not modified, in any letter, by this
 phase.
+
+## Fixed-risk measurement mode and the entry-timing permutation redesign
+
+Two follow-up changes to the measurement tooling, added 2026-08-25 - neither
+touches CLAUDE.md section 4, which is unmodified by both.
+
+**Fixed-risk sizing mode** (`positionSizing.ts`'s `computeFixedRiskPositionSize`;
+`npm run backtest:fixed-risk` / `backtest.ts --sizing fixed`; the comparator
+inside `diagnose.ts`'s permutation step). The frozen spec sizes every trade
+at 2% of *current* equity, which compounds - on a losing run that shrinks
+equity far enough, `computePositionSize` starts rejecting signals for
+falling under the exchange's `minSz`, silently truncating whatever sample
+win-rate/expectancy-R statistics get computed from (5m's own canonical run
+hit exactly this: 1,808 out-of-sample signals skipped for sizing against
+only 155 that opened a position - see "Why Phase 2 is negative" above). The
+fixed-risk mode risks a flat 2 USDT per trade regardless of equity - no
+compounding - so every signal that survives the one-position-at-a-time rule
+gets a fair shot at sizing. It is measurement-only: the frozen spec, the
+live bot, and the default (unflagged) behavior of every script stay at 2%
+of equity, compounding, unchanged. The equity curve, drawdown, and total
+return from the default compounding run remain the numbers that describe
+what a real account would actually do; fixed-risk numbers describe
+trade-level statistics on an untruncated sample and are always reported
+alongside, never in place of, the compounding numbers.
+
+**Permutation null redesign** (`randomBaseline.ts`). The permutation test
+used throughout Phase 2 and Phase 2b (see the audit finding above and in
+[`docs/phase2b-results.md`](docs/phase2b-results.md)) reused each real
+signal's own anchor and re-drew only long-vs-short by a fair coin - the
+auditor found the "opposite direction" geometrically degenerate at
+essentially every anchor (0.345% valid on 5m), so each trial ended up close
+to a random ~50% subsample of the system's own trades, not a coin-flip
+baseline. This redesign takes a different path than the one originally
+flagged as follow-up (mirroring SL distance across entry, still a
+direction-randomization design): it randomizes entry TIMING instead - draw
+as many random, distinct, warm-up-eligible bar0 positions as there are real
+signals (sampled without replacement from the same universe
+`generateSignals` draws from), assign them the *exact* real long/short
+ratio (not a per-anchor coin), and construct entry/SL/TP with the
+unmodified CLAUDE.md section 4 formula at that random bar0/bar2. Same
+engine, same one-position-at-a-time rule, fixed-risk sizing (above) for
+both the trials and the real system's comparator number, 1000 trials. An
+anchor is dropped from a trial if its randomly-assigned side is
+geometrically degenerate there - expected to be rare (a random bar0 has no
+systematic relationship to its own bar2, unlike a real pattern's bar0),
+but *measured, not assumed*: `aggregateAnchorValidity` reports what
+fraction of drawn anchors actually produced a signal, gated at a required
+>=90% (`ANCHOR_VALIDITY_MIN_PCT`) for the null to be trusted at all.
+
+**Status: implemented and unit-tested, not yet re-run against real data.**
+The session that built this could not reach OKX - `www.okx.com` is blocked
+by this execution environment's network egress policy (confirmed via the
+outbound proxy's status endpoint: a policy denial, not a transient failure)
+- and `data/` is gitignored and was not present in the fresh container, so
+even `npm run fetch-data` could not be run. Every number elsewhere in this
+README and in `docs/phase2b-results.md` predates this redesign and was
+produced by the old direction-flip null; none of it has been reproduced or
+corrected under the new one. To produce real numbers once OKX is reachable:
+
+```bash
+npm run fetch-instrument
+npm run fetch-data -- --bar 5m
+npm run backtest                    # canonical (compounding), unchanged
+npm run backtest:fixed-risk         # fixed-risk stats: in/out-of-sample, before/after cost
+npm run diagnose -- --trials 1000   # Step 3 now runs the entry-timing null - check the anchor-validity gate first
+```
+
+If the anchor-validity gate reports below 90%, per the task that requested
+this redesign: stop and escalate rather than reading the percentile it
+guards - the null would still be broken.
 
 ## Spec summary
 
@@ -209,7 +297,10 @@ src/
 
   instrumentSpec.ts         InstrumentSpec type + loader/validator for the cached instrument spec
   decimal.ts                floorToStep/ceilToStep/roundToStep - decimal-safe rounding to an exchange step size
-  positionSizing.ts         computePositionSize(): the frozen 2%-risk sizing formula, pure
+  positionSizing.ts         computePositionSize(): the frozen 2%-risk sizing formula, pure. Also
+                             computeFixedRiskPositionSize(): measurement-only flat-risk mode (no equity,
+                             no compounding) - see "Fixed-risk measurement mode" below. Both share their
+                             lot/minSz/guard logic and return a targetRiskUsdt alongside actualRiskUsdt.
   funding.ts                8h funding boundary math (00:00/08:00/16:00 UTC): isFundingTs, countFundingCrossings
 
   stats.ts                  percentile/mean/sum/monthKey helpers shared by analyze.ts, backtestEngine.ts, diagnose.ts
@@ -218,23 +309,35 @@ src/
                              (runScenario), and metrics (computeMetrics, splitMetrics). Pure - no file I/O.
                              prepareData() takes the candle interval explicitly (no default) so a non-5m
                              timeframe can't silently segment on the wrong interval.
-  backtest.ts                CLI: --bar (default 5m) selects the timeframe; loads that bar's data + the
-                             shared spec, runs every {slippage x ambiguous-bound x fee-model} scenario through
-                             backtestEngine.ts, prints the report, writes data/backtest-report[-<bar>].txt and
-                             data/backtest-results[-<bar>].json (5m keeps its original unsuffixed filenames).
+  backtest.ts                CLI: --bar (default 5m) selects the timeframe; --sizing compounding|fixed
+                             (default compounding) selects the sizing formula - "fixed" is the
+                             measurement-only mode (see below), never the default, and writes to
+                             "-fixed-risk"-tagged files so it can never overwrite the canonical compounding
+                             artifacts. Loads that bar's data + the shared spec, runs every {slippage x
+                             ambiguous-bound x fee-model} scenario through backtestEngine.ts (plus an
+                             explicit gross fee=0/slippage=0 scenario when --sizing fixed, for a clean
+                             before/after-cost comparison), prints the report, writes
+                             data/backtest-report[-fixed-risk][-<bar>].txt and the matching .json (5m
+                             compounding keeps the original unsuffixed filenames).
 
   analyze.ts                 CLI: --bar (default 5m) Phase 1 measurement (signal counts, SL-distance
                              distribution, survival count) - a lighter-weight tool than backtest.ts, no
                              fees/sizing/equity.
 
-  randomBaseline.ts          Permutation-test null hypothesis: buildDirectionalVariants() reconstructs
-                             both a forced-long and forced-short version of every real signal anchor
-                             (same bar2/bar0, same entry/SL/TP formula); runPermutationTrial() feeds a
-                             coin-flip-chosen mix through the real runScenario(), unmodified, so "same
-                             engine, same structure, only direction randomized" is structurally true,
-                             not just asserted. Seeded (mulberry32) for reproducibility.
+  randomBaseline.ts          Permutation-test null hypothesis, redesigned 2026-08-25 to randomize entry
+                             TIMING rather than direction (see "Fixed-risk measurement mode" below for
+                             why): eligibleAnchors() finds every warm-up-eligible bar0 position;
+                             buildRandomTimingTrial() draws as many distinct random anchors as there are
+                             real signals, assigns them the exact real long/short ratio, and constructs
+                             entry/SL/TP with the unmodified formula, dropping any (anchor, side) pairing
+                             that's geometrically degenerate there; runRandomTimingTrial(s)() feeds the
+                             result through the real runScenario() with fixed-risk sizing.
+                             aggregateAnchorValidity() reports what fraction of drawn anchors survived, for
+                             the >=90% (ANCHOR_VALIDITY_MIN_PCT) trust gate. Seeded (mulberry32) for
+                             reproducibility.
   diagnose.ts                 CLI: --bar (default 5m) and --trials (default 100) - root-cause diagnosis:
-                             CSV sample export, gross (pre-cost) expectancy, the permutation test (plus its
+                             CSV sample export, gross (pre-cost) expectancy, the entry-timing permutation
+                             test (comparator sized fixed-risk; reports the anchor-validity gate; plus its
                              raw-95th and Bonferroni-adjusted-98.75th pass bars for the current
                              multi-timeframe test count), and year/side/SL-quartile/hour-of-day breakdowns.
                              Writes data/signal-sample-3days[-<bar>].csv, data/diagnosis-report[-<bar>].txt,
@@ -328,7 +431,9 @@ npm run fetch-funding-history  # fetch and cache available funding-rate-history 
 npm run validate     # integrity report for every data/DOT-USDT-SWAP-<bar>.json found on disk (1m/5m/15m/1H/4H)
 npm run analyze -- --bar 5m       # Phase 1 measurement report (signal counts, SL-distance, survival count); default --bar 5m
 npm run backtest -- --bar 1H       # Phase 2 full backtest: all scenarios, in-sample/out-of-sample; default --bar 5m
-npm run diagnose -- --bar 1H --trials 1000  # root-cause diagnosis + permutation test; default --bar 5m --trials 100
+npm run backtest -- --sizing fixed         # same, but measurement-only flat-risk sizing (default: compounding)
+npm run backtest:fixed-risk                # shorthand for the line above, --bar 5m
+npm run diagnose -- --bar 1H --trials 1000  # root-cause diagnosis + entry-timing permutation test; default --bar 5m --trials 100
 npm run charts            # renders the three SVG charts described above into data/ (5m only)
 ```
 
@@ -363,13 +468,16 @@ CLAUDE.md section 6).
   specific periods containing ambiguous trades if the lower/upper bound
   backtests straddle zero. In the current Phase 2 run they do not (both
   bounds lose money), so 1m data was not needed for this purpose.
-- **The permutation test (step 3 of the diagnosis) isolates directional
-  skill specifically, not "does trading at these moments at all matter."**
-  It reuses the real signals' exact entry timestamps and exact bar2/bar0
-  price levels, randomizing only long-vs-short. It does not test whether
-  trading at a uniformly random time (instead of at a 3-strong-candle
-  moment) would do better or worse - that's a different question this
-  diagnosis didn't ask.
+- **The permutation test (step 3 of the diagnosis) isolates entry-timing
+  skill specifically, not "is the long/short direction call itself any
+  good."** As of the 2026-08-25 redesign (see "Fixed-risk measurement mode
+  and the entry-timing permutation redesign" above) it holds the real
+  long/short ratio and trade count fixed and randomizes which bar is
+  treated as the signal bar. It does not test whether the pattern's
+  direction call beats a coin flip at its own chosen moments - the previous
+  version of this test attempted that and the auditor found its null
+  construction geometrically broken (see above); no corrected version of
+  that specific question has been built.
 - **`data/monthly-win-rate.svg`'s x-axis skips months with zero trades**
   rather than showing them as empty space at their true calendar position.
   Given how few trades exist in 2024-2025 (see the yearly breakdown in

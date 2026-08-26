@@ -5,6 +5,7 @@ import { at, type Candle, type Signal } from "./types.js";
 import { loadInstrumentSpec } from "./instrumentSpec.js";
 import { num, pct, usd } from "./format.js";
 import { mean, percentile } from "./stats.js";
+import { computeFixedRiskPositionSize, computePositionSize } from "./positionSizing.js";
 import {
   computeMetrics,
   computeSplitTs,
@@ -13,8 +14,9 @@ import {
   splitMetrics,
   type BacktestConfig,
   type ClosedTrade,
+  type SizingFn,
 } from "./backtestEngine.js";
-import { buildDirectionalVariants, mulberry32, percentileRankOf, runPermutationTrials } from "./randomBaseline.js";
+import { aggregateAnchorValidity, ANCHOR_VALIDITY_MIN_PCT, mulberry32, percentileRankOf, runRandomTimingTrials } from "./randomBaseline.js";
 import { barIntervalMs, isBar, SUPPORTED_BARS, type Bar } from "./barInterval.js";
 
 const INST_ID = "DOT-USDT-SWAP";
@@ -37,6 +39,7 @@ const CANONICAL_CONFIG: BacktestConfig = {
   takerFeeRate: 0.0005,
   makerFeeRate: 0.0002,
   fundingRateForCost: null,
+  computeSize: computePositionSize,
 };
 const GROSS_CONFIG: BacktestConfig = {
   startingEquityUsdt: STARTING_EQUITY_USDT,
@@ -46,6 +49,25 @@ const GROSS_CONFIG: BacktestConfig = {
   takerFeeRate: 0,
   makerFeeRate: 0,
   fundingRateForCost: null,
+  computeSize: computePositionSize,
+};
+// Fixed-risk sizing (positionSizing.ts), used only as the comparator for
+// Step 3's permutation test below, so the real system's numbers and the
+// null's trials are sized the same way - equity compounding would let a
+// trial's own losing streak shrink its sizing and silently drop later
+// draws, exactly the truncated-sample problem that mode exists to avoid.
+// Deliberately separate from GROSS_CONFIG above: Step 2's headline gross
+// number stays on the frozen spec's compounding sizing, unchanged.
+const fixedRiskComputeSize: SizingFn = ({ entry, sl, spec }) => computeFixedRiskPositionSize({ entry, sl, spec });
+const GROSS_FIXED_RISK_CONFIG: BacktestConfig = {
+  startingEquityUsdt: STARTING_EQUITY_USDT,
+  slippageTicks: 0,
+  ambiguousBound: "lower",
+  feeModel: "limit-tp",
+  takerFeeRate: 0,
+  makerFeeRate: 0,
+  fundingRateForCost: null,
+  computeSize: fixedRiskComputeSize,
 };
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -231,33 +253,68 @@ function main(): void {
   log(`  (reference: zero-cost break-even win rate at a 2:1 RR is exactly 1/3 = 33.33%)`);
   log("");
 
-  // --- Step 3: random-direction baseline -----------------------------
-  log("=== Step 3: random-direction baseline (permutation test) ===");
+  // --- Step 3: random-ENTRY-TIMING baseline (permutation test) ---------
+  // Redesigned per the auditor's finding on the previous (direction-flip)
+  // null: reusing each real anchor's own bar2/bar0 and re-drawing only
+  // long-vs-short made the "opposite direction" geometrically degenerate at
+  // essentially every anchor after three consecutive strong candles
+  // (auditor-measured 0.345% valid on 5m), so each trial was close to a
+  // random ~50% subsample of the system's OWN trades, not a coin-flip
+  // baseline - see randomBaseline.ts's module comment for the full
+  // mechanism. This null instead holds the real long/short ratio and trade
+  // count fixed and randomizes WHICH BAR is the signal bar.
+  log("=== Step 3: random-entry-timing baseline (permutation test) ===");
   log(
-    "Same anchors (bar2/bar0), same entry/SL/TP construction formula, same one-position-at-a-time rule, same position sizing, same engine (runScenario) - the ONLY thing randomized is which direction (long/short) each anchor trades, via a fair coin. Fee=0/slippage=0/funding=0, matching step 2, so the comparison is apples to apples.",
+    "Same real long/short ratio and trade count, same entry/SL/TP construction formula, same one-position-at-a-time rule, same engine (runScenario), fixed-risk sizing (positionSizing.ts, not compounding - a trial's own losing streak must not shrink its sizing and drop later draws). The thing randomized is WHICH BAR is the signal bar, drawn uniformly without replacement from the same warm-up-eligible universe real signals come from. Fee=0/slippage=0/funding=0. Question: does the pattern's chosen timing beat the same long/short mix at random moments?",
   );
-  const variants = buildDirectionalVariants(prepared, spec);
-  const trials = runPermutationTrials(prepared, variants, spec, STARTING_EQUITY_USDT, trialCount, PERMUTATION_SEED);
+
+  const grossFixedRiskRun = runScenario(prepared, spec, GROSS_FIXED_RISK_CONFIG);
+  const grossFixedRiskOverall = computeMetrics(grossFixedRiskRun.trades, STARTING_EQUITY_USDT, {
+    ignoredCount: grossFixedRiskRun.ignoredTs.length,
+    skippedSizingCount: grossFixedRiskRun.skippedSizingTs.length,
+    stillOpenCount: grossFixedRiskRun.stillOpenTs.length,
+  });
+  log(
+    `Real system, gross, fixed-risk sizing (this test's comparator - differs from Step 2's compounding gross number above, which stays on the frozen spec's sizing): n=${grossFixedRiskOverall.sampleSize}  win=${pct(grossFixedRiskOverall.winRate * 100)}  E[R]=${num(grossFixedRiskOverall.expectancyR)}`,
+  );
+
+  const trials = runRandomTimingTrials(prepared, spec, STARTING_EQUITY_USDT, trialCount, PERMUTATION_SEED);
+
+  const validity = aggregateAnchorValidity(trials);
+  const validityOk = validity.pct >= ANCHOR_VALIDITY_MIN_PCT;
+  log(
+    `Anchor validity: ${validity.valid} / ${validity.attempted} random anchors produced a real (non-degenerate) signal (${pct(validity.pct)}). Gate: >= ${ANCHOR_VALIDITY_MIN_PCT}% required to trust this null - ${validityOk ? "PASSES" : "FAILS"}.`,
+  );
+  if (!validityOk) {
+    log(
+      `*** NULL INVALID: anchor validity is below the ${ANCHOR_VALIDITY_MIN_PCT}% gate. Every number below this line is still computed and written to the JSON output for the record, but must NOT be read as a valid random-timing comparison. Stop and escalate before drawing any conclusion from it. ***`,
+    );
+  }
+
   const trialWinRates = trials.map((t) => t.winRate).filter((v) => Number.isFinite(v));
   const trialExpectancies = trials.map((t) => t.expectancyR).filter((v) => Number.isFinite(v));
   const trialNs = trials.map((t) => t.n);
 
-  const realWinRatePct = grossOverall.winRate * 100;
-  const realExpectancyR = grossOverall.expectancyR;
+  const realWinRatePct = grossFixedRiskOverall.winRate * 100;
+  const realExpectancyR = grossFixedRiskOverall.expectancyR;
   const winRatePercentile = percentileRankOf(realWinRatePct, trialWinRates.map((r) => r * 100));
   const expectancyPercentile = percentileRankOf(realExpectancyR, trialExpectancies);
 
-  log(`${trialCount} trials, seed=${PERMUTATION_SEED}. Trial n ranges ${Math.min(...trialNs)}-${Math.max(...trialNs)} trades (real system, gross: n=${grossOverall.sampleSize}).`);
   log(
-    `Random-baseline win rate: mean=${pct(mean(trialWinRates) * 100)} min=${pct(Math.min(...trialWinRates) * 100)} max=${pct(Math.max(...trialWinRates) * 100)}`,
+    `${trialCount} trials, seed=${PERMUTATION_SEED}. Trial n ranges ${Math.min(...trialNs)}-${Math.max(...trialNs)} trades (real system, gross fixed-risk: n=${grossFixedRiskOverall.sampleSize}).`,
   );
   log(
-    `Random-baseline E[R]:     mean=${num(mean(trialExpectancies))} min=${num(Math.min(...trialExpectancies))} max=${num(Math.max(...trialExpectancies))}`,
+    `Random-timing win rate: mean=${pct(mean(trialWinRates) * 100)} min=${pct(Math.min(...trialWinRates) * 100)} max=${pct(Math.max(...trialWinRates) * 100)}`,
   );
-  log(`Real system's gross win rate (${pct(realWinRatePct)}) sits at percentile ${num(winRatePercentile, 1)} of the ${trialCount} random trials.`);
-  log(`Real system's gross E[R] (${num(realExpectancyR)}) sits at percentile ${num(expectancyPercentile, 1)} of the ${trialCount} random trials.`);
   log(
-    "A percentile near 50 means the pattern's directional call is statistically indistinguishable from a coin flip at these same moments; near 0 or 100 would mean it's notably worse or better than random.",
+    `Random-timing E[R]:     mean=${num(mean(trialExpectancies))} min=${num(Math.min(...trialExpectancies))} max=${num(Math.max(...trialExpectancies))}`,
+  );
+  log(
+    `Real system's gross win rate (${pct(realWinRatePct)}) sits at percentile ${num(winRatePercentile, 1)} of the ${trialCount} random-timing trials.`,
+  );
+  log(`Real system's gross E[R] (${num(realExpectancyR)}) sits at percentile ${num(expectancyPercentile, 1)} of the ${trialCount} random-timing trials.`);
+  log(
+    "A percentile near 50 means the pattern's chosen timing is statistically indistinguishable from trading the same long/short mix at random moments; near 100 means the pattern's timing beats random, near 0 that it's worse.",
   );
 
   // Phase 2b (docs/hypothesis-2b.md) criterion 3 is the raw 95th percentile
@@ -331,8 +388,13 @@ function main(): void {
         bar,
         gross: { overall: grossOverall, inSample: grossSplit.inSample, outOfSample: grossSplit.outOfSample },
         permutation: {
+          nullDesign: "random-entry-timing",
           trials: trialCount,
           seed: PERMUTATION_SEED,
+          anchorValidity: validity,
+          anchorValidityMinPct: ANCHOR_VALIDITY_MIN_PCT,
+          anchorValidityPasses: validityOk,
+          grossFixedRiskOverall,
           trialWinRates,
           trialExpectancies,
           realWinRatePct,

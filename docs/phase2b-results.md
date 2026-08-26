@@ -308,6 +308,15 @@ than fixed inline:
   terms and mirror it across entry instead of reusing `bar2.low`/
   `bar2.high`, so every anchor trades in both directions and trial n
   matches real n.
+  **Update 2026-08-25: addressed, via a different design than proposed
+  above** - a follow-up task judged direction-randomization itself
+  (mirrored-SL or otherwise) geometrically unworkable as a coin-flip
+  baseline for this pattern, and asked for entry-TIMING randomization
+  instead. See "Update 2026-08-25" at the end of this document for the full
+  design and current status - implemented and unit-tested, **not yet
+  re-run against real data**, so every number above in this document is
+  still the old (direction-flip) null's output and is unaffected by this
+  update.
 - **`src/fetchFundingHistory.ts` fires on import**, not only when run
   directly, so every `backtest.ts` run silently refetches and overwrites
   the funding-rate-history cache from OKX. Consequence specific to Phase
@@ -349,3 +358,101 @@ proof. `docs/` is untracked (`.gitignore` covers `data/` only, but nothing
 in this repo was committed during Phase 2b). If stronger provenance matters
 going forward, the fix is to commit the hypothesis file by itself, before
 the first run, rather than relying on mtimes.
+
+## Update 2026-08-25: permutation null redesigned (random entry timing), re-run not yet performed
+
+This is a follow-up to the "Auditor finding" section at the top of this
+document, done as a separate task after everything above was already
+recorded. Nothing above this section has been edited or re-stated - it
+remains the historical record of what the old (direction-flip) null
+produced. This section documents a different, later change and is explicit
+about what has and has not been done since.
+
+**What changed.** `src/randomBaseline.ts`'s permutation null previously
+reused each real signal's own anchor (`bar2`/`bar0`) and re-drew only
+long-vs-short by a fair coin. Per the finding above, the "opposite
+direction" at a real anchor is geometrically degenerate almost everywhere
+(0.345% valid on 5m) because three consecutive strong candles create a
+structural asymmetry between the taken direction's SL and the untaken
+direction's - not an incidental one a mirrored-SL construction would fix
+either. The task that requested this update judged direction-randomization
+itself geometrically unworkable as a coin-flip baseline for this pattern
+(superseding the "mirror SL across entry" fix flagged as follow-up work
+above) and asked for a null built on entry-**timing** randomization
+instead.
+
+**The new null.** For a given dataset: draw as many random, distinct bar0
+positions as there are real signals, sampled without replacement from the
+same warm-up-eligible universe `generateSignals` draws from (every position
+with >=500 prior bars, matching `computeSignal`'s own warm-up gate exactly -
+`randomBaseline.ts`'s `eligibleAnchors`). Assign those anchors the *exact*
+real long/short split (a shuffled multiset, not a per-anchor coin, so every
+trial reproduces the real ratio exactly rather than a noisy approximation of
+it - `countRealSides` + the shuffle in `buildRandomTimingTrial`). Construct
+entry/SL/TP with the unmodified CLAUDE.md section 4 formula (entry = bar0
+close, SL = bar2 low/high, TP = 2R) at that random bar0/bar2. Run the result
+through the same engine (`runScenario`), the same one-position-at-a-time
+rule, 1000 trials, seed unchanged (`20260824`). An anchor is dropped from a
+trial if its assigned side is geometrically degenerate there (same guard
+`computeSignal` itself applies) - expected to be rare, since a random bar0
+has no systematic relationship to its own bar2 the way a real pattern's
+does, but this is *measured, not assumed*: `aggregateAnchorValidity` reports
+what fraction of drawn anchors actually produced a signal, gated at a
+required >=90% (`ANCHOR_VALIDITY_MIN_PCT`) for the null to be trusted at
+all - below that, `diagnose.ts` still writes the numbers for the record but
+flags them as not to be trusted, per the task's explicit instruction to stop
+and escalate rather than read the percentile.
+
+**Sizing: a new fixed-risk measurement mode, used for both sides of the
+comparison.** Added alongside this redesign
+(`positionSizing.ts`'s `computeFixedRiskPositionSize`): a flat 2 USDT risk
+per trade, no equity, no compounding - not the frozen spec, which stays 2%
+of current equity for the live bot and every canonical (compounding)
+backtest scenario. Motivation: this document's own 5m result above
+(1,808 out-of-sample signals skipped for sizing against only 155 that
+opened a position, as equity collapsed under compounding) shows that
+equity-based sizing can truncate the very sample a permutation test or an
+expectancy statistic is trying to measure from. Both the redesigned null's
+1000 trials and the real system's gross win-rate/E[R] comparator now use
+fixed-risk sizing, so neither side of the percentile comparison is an
+artifact of one side's sizing truncating its sample differently from the
+other's. `backtest.ts` also gained a `--sizing compounding|fixed` flag
+(`npm run backtest:fixed-risk` for `--bar 5m`) for standalone trade-level
+statistics (win rate, expectancy R, before/after cost, break-even win rate)
+on an untruncated sample - the equity curve, drawdown, and total return
+that describe what a real compounding account would do are unaffected and
+still come from the default (compounding) run.
+
+**Status: implemented and unit-tested (`src/randomBaseline.test.ts`,
+`src/positionSizing.test.ts`, `src/backtestEngine.test.ts`), not yet run
+against real data, for 5m or any other timeframe.** The session that built
+this could not reach OKX: `www.okx.com` is blocked by this execution
+environment's network egress policy (confirmed via the outbound proxy's
+status endpoint - a policy denial, not a transient failure), and `data/` is
+gitignored and was not present in the fresh container that session ran in,
+so even `npm run fetch-data` could not be run. Consequently:
+
+- No anchor-validity percentage exists yet for this null on any timeframe -
+  the >=90% gate above is untested against real data.
+- No win-rate/E[R] percentile comparison exists yet under the new null.
+- No fixed-risk win rate, expectancy R, or break-even win rate exists yet
+  for 5m or any other timeframe.
+- Every number anywhere else in this document predates this update and was
+  produced by the old direction-flip null and compounding-only sizing -
+  none of it has been reproduced, corrected, or invalidated by this change,
+  because it has not yet been re-run at all.
+
+**To produce real numbers once OKX is reachable:**
+
+```bash
+npm run fetch-instrument
+npm run fetch-data -- --bar 5m
+npm run backtest                    # canonical (compounding) 5m report - unchanged
+npm run backtest:fixed-risk         # fixed-risk 5m stats: in/out-of-sample, before/after cost
+npm run diagnose -- --trials 1000   # Step 3 now runs the entry-timing null - check the anchor-validity gate first
+```
+
+Per the task that requested this redesign: if `diagnose`'s anchor-validity
+gate reports below 90%, stop and escalate rather than reading the
+percentile it guards - that would mean the null is still broken, in a
+different way than the one this update fixed.

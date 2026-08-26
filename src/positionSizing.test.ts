@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computePositionSize, RISK_PER_TRADE } from "./positionSizing.js";
+import { computeFixedRiskPositionSize, computePositionSize, FIXED_RISK_USDT_FOR_MEASUREMENT, RISK_PER_TRADE } from "./positionSizing.js";
 import type { InstrumentSpec } from "./instrumentSpec.js";
 
 // Chained division/multiplication on decimal literals (e.g. 10 - 9.9) picks
@@ -29,6 +29,7 @@ test("computes contracts, actual risk, and margin for a clean division", () => {
   assert.ok(result);
   // riskUsdt = 2, slPct = 0.01, targetNotional = 200, coinQty = 20, ctVal=1 -> rawContracts=20
   assert.equal(result.contracts, 20);
+  assertClose(result.targetRiskUsdt, 2); // 100 * RISK_PER_TRADE
   assertClose(result.actualNotionalUsdt, 200);
   assertClose(result.actualRiskUsdt, 2);
   assertClose(result.marginUsdt, 4); // 200 / lever(50)
@@ -79,6 +80,66 @@ test("fractional lotSz and ctVal are respected exactly (not just integer specs)"
   assert.ok(result);
   assert.equal(result.contracts, 200);
   assert.equal(result.actualNotionalUsdt, 200 * 0.1 * 10);
+});
+
+// --- computeFixedRiskPositionSize: measurement-only, no equity, no compounding ---
+
+test("fixed-risk sizing defaults to FIXED_RISK_USDT_FOR_MEASUREMENT and takes no equity input at all", () => {
+  const result = computeFixedRiskPositionSize({ entry: 10, sl: 9.9, spec: DOT_SPEC });
+  assert.ok(result);
+  // riskUsdt=2 (default), slPct=0.01, targetNotional=200, coinQty=20, ctVal=1 -> rawContracts=20
+  assert.equal(result.contracts, 20);
+  assertClose(result.targetRiskUsdt, FIXED_RISK_USDT_FOR_MEASUREMENT);
+  assertClose(result.actualRiskUsdt, 2);
+});
+
+test("fixed-risk sizing matches equity-based sizing exactly when equity*2% equals the flat risk", () => {
+  const compounding = computePositionSize({ equityUsdt: 100, entry: 10, sl: 9.7, spec: DOT_SPEC }); // riskUsdt=2
+  const fixed = computeFixedRiskPositionSize({ entry: 10, sl: 9.7, spec: DOT_SPEC }); // riskUsdt=2 (default)
+  assert.ok(compounding);
+  assert.ok(fixed);
+  assert.equal(fixed.contracts, compounding.contracts);
+  assertClose(fixed.actualRiskUsdt, compounding.actualRiskUsdt);
+});
+
+test("fixed-risk sizing produces the SAME contract count regardless of how small equity has become - no compounding", () => {
+  // This is the whole point of the mode: a real (equity-based) account this
+  // small would floor to 0 contracts (see the minSz test below), silently
+  // truncating the sample. Fixed risk never even looks at equity.
+  const atHundred = computeFixedRiskPositionSize({ entry: 10, sl: 9.9, spec: DOT_SPEC });
+  const atOneUsdt = computeFixedRiskPositionSize({ entry: 10, sl: 9.9, spec: DOT_SPEC, riskUsdt: FIXED_RISK_USDT_FOR_MEASUREMENT });
+  assert.ok(atHundred);
+  assert.ok(atOneUsdt);
+  assert.equal(atHundred.contracts, atOneUsdt.contracts);
+
+  // The equivalent equity-based call, on an account too small to clear
+  // minSz, IS rejected - demonstrating the truncation fixed-risk avoids.
+  assert.equal(computePositionSize({ equityUsdt: 1, entry: 10, sl: 9.9, spec: DOT_SPEC }), null);
+});
+
+test("fixed-risk sizing still floors to lot size and rejects below minSz, never rounds up", () => {
+  // riskUsdt=2, slPct=0.003 (entry=10, sl=9.97) -> targetNotional=666.67, coinQty=66.67 -> floors to 66
+  const result = computeFixedRiskPositionSize({ entry: 10, sl: 9.97, spec: DOT_SPEC });
+  assert.ok(result);
+  assert.equal(result.contracts, 66);
+  assert.ok(result.actualRiskUsdt < FIXED_RISK_USDT_FOR_MEASUREMENT);
+
+  // A custom, tiny riskUsdt floors to 0 contracts (< minSz) and is rejected.
+  const tooSmall = computeFixedRiskPositionSize({ entry: 10, sl: 9.9, spec: DOT_SPEC, riskUsdt: 0.01 });
+  assert.equal(tooSmall, null);
+});
+
+test("fixed-risk sizing rejects degenerate SL distance the same way computePositionSize does", () => {
+  assert.equal(computeFixedRiskPositionSize({ entry: 10, sl: 10, spec: DOT_SPEC }), null);
+  assert.equal(computeFixedRiskPositionSize({ entry: 0, sl: -1, spec: DOT_SPEC }), null);
+});
+
+test("fixed-risk sizing respects a custom riskUsdt override", () => {
+  // riskUsdt=10, slPct=0.01 -> targetNotional=1000, coinQty=100 -> rawContracts=100
+  const result = computeFixedRiskPositionSize({ entry: 10, sl: 9.9, spec: DOT_SPEC, riskUsdt: 10 });
+  assert.ok(result);
+  assert.equal(result.contracts, 100);
+  assertClose(result.targetRiskUsdt, 10);
 });
 
 test("actual risk after flooring never exceeds target risk (property check across many combos)", () => {
