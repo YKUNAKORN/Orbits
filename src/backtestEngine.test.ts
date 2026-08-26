@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Candle, Signal } from "./types.js";
 import type { InstrumentSpec } from "./instrumentSpec.js";
+import { computeFixedRiskPositionSize, computePositionSize, FIXED_RISK_USDT_FOR_MEASUREMENT } from "./positionSizing.js";
 import {
   computeNaturalResolutions,
   computeMetrics,
@@ -12,6 +13,7 @@ import {
   type ClosedTrade,
   type PreparedData,
   type RunResult,
+  type SizingFn,
 } from "./backtestEngine.js";
 
 const STEP = 300_000; // 5m
@@ -43,6 +45,8 @@ const SPEC: InstrumentSpec = {
   lever: 50,
 };
 
+const fixedRiskComputeSize: SizingFn = ({ entry, sl, spec }) => computeFixedRiskPositionSize({ entry, sl, spec });
+
 function baseConfig(overrides: Partial<BacktestConfig> = {}): BacktestConfig {
   return {
     startingEquityUsdt: 100,
@@ -52,6 +56,7 @@ function baseConfig(overrides: Partial<BacktestConfig> = {}): BacktestConfig {
     takerFeeRate: 0.0005,
     makerFeeRate: 0.0002,
     fundingRateForCost: null,
+    computeSize: computePositionSize,
     ...overrides,
   };
 }
@@ -192,6 +197,46 @@ test("risk sizing compounds off current equity, not the starting equity", () => 
   assertClose(second.equityBefore, first.equityAfter);
   assertClose(second.targetRiskUsdt, first.equityAfter * 0.02);
   assert.notEqual(second.targetRiskUsdt, first.targetRiskUsdt);
+});
+
+test("fixed-risk sizing mode avoids the truncation compounding causes on a small/depleted account", () => {
+  // Same fixture as "a signal rejected by position sizing does not block
+  // the next signal" above, where equity=1 makes the frozen (compounding)
+  // formula floor both signals to 0 contracts. Fixed-risk sizing ignores
+  // equity entirely, so the exact same signals size and trade normally -
+  // this is the truncation computeFixedRiskPositionSize exists to avoid.
+  const a = longSignal(0, 10, 9.9, 10.2);
+  const b = longSignal(1, 10, 9.5, 11);
+  const segment: Candle[] = [
+    candle(0, 10, 10.1, 9.9, 10),
+    candle(1, 10, 10.1, 9.9, 10),
+    candle(2, 10, 11.2, 9.4, 10.5),
+  ];
+  const run = runScenario(prepare(segment, [a, b]), SPEC, baseConfig({ startingEquityUsdt: 1, computeSize: fixedRiskComputeSize }));
+
+  assert.equal(run.skippedSizingTs.length, 0);
+  assert.equal(run.trades.length, 2);
+  for (const t of run.trades as ClosedTrade[]) {
+    assertClose(t.targetRiskUsdt, FIXED_RISK_USDT_FOR_MEASUREMENT);
+  }
+});
+
+test("fixed-risk sizing mode: contract size does not move with accumulated P&L (no compounding)", () => {
+  const a = longSignal(0, 10, 9.5, 11); // resolves TP at index 1
+  const b = longSignal(1, 10, 9.5, 11); // opens on the same bar that closes A, resolves TP at index 2
+  const segment: Candle[] = [
+    candle(0, 10, 10.1, 9.9, 10),
+    candle(1, 10, 11.2, 10, 10),
+    candle(2, 10, 11.2, 10, 10.5),
+  ];
+  const run = runScenario(prepare(segment, [a, b]), SPEC, baseConfig({ computeSize: fixedRiskComputeSize }));
+
+  assert.equal(run.trades.length, 2);
+  const [first, second] = run.trades as [ClosedTrade, ClosedTrade];
+  assert.notEqual(first.equityAfter, first.equityBefore); // display P&L still accumulates...
+  assertClose(second.targetRiskUsdt, first.targetRiskUsdt); // ...but the sizing target never moves with it
+  assert.equal(first.contracts, 4);
+  assert.equal(second.contracts, first.contracts); // identical SL distance -> identical contracts, unlike compounding
 });
 
 test("computeSplitTs divides the range at the given fraction (default 70%)", () => {
